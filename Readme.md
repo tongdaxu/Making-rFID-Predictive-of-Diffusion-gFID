@@ -84,7 +84,7 @@
     | DE-TOK       | 11.97 |               | 17.51 | DETOK.yaml | SiT-XL/1D, SiT-B/1D |
     | DM-VAE       | 4.65 | 8.69 | 8.14 | DMVAE.yaml | SiT-XL/1D, SiT-B/1D |
     | REPAE-VAE    | 12.95 |               | 36.70 | REPAEVAE.yaml | SiT-XL/2, SiT-B/2 |
-    | RAE          | 4.25 |               | 7.68 | RAE.yaml | SiT-XL/1, SiT-B/1 |
+    | RAE          | 4.25 | - | 7.68 | RAE.yaml | SiT-XL/1, SiT-B/1 |
 
 
 ## To Include Your VAE in VAE Arena

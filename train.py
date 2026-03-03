@@ -180,7 +180,7 @@ def main(args):
     for name, param in vae.named_parameters():
         param.requires_grad_(False)
 
-    fake_in = torch.zeros([1,3,args.resolution,args.resolution]).to(device)
+    fake_in = torch.zeros([1, 3, args.resolution, args.resolution]).to(device)
     fake_z = vae.encode(fake_in)[0]
 
     if len(fake_z.shape) == 3:
@@ -194,9 +194,9 @@ def main(args):
         in_channels = fake_z.shape[-1]
         xT = torch.randn((n, latent_size, in_channels), device=device)
     else:
-        assert(0)
+        assert 0
 
-    tshift = math.sqrt(float(fake_z.numel())/4096.0)
+    tshift = math.sqrt(float(fake_z.numel()) / 4096.0)
 
     block_kwargs = {"fused_attn": args.fused_attn, "qk_norm": args.qk_norm}
     model = SiT_models[args.model](
@@ -431,11 +431,8 @@ def main(args):
                         latents_bias = latents_stats["latents_bias"].view(
                             1, 1, in_channels
                         )
-                    samples = (
-                        accelerator.unwrap_model(vae)
-                        .decode(
-                            denormalize_latents(samples, latents_scale, latents_bias)
-                        )
+                    samples = accelerator.unwrap_model(vae).decode(
+                        denormalize_latents(samples, latents_scale, latents_bias)
                     )
                     samples = (samples + 1) / 2.0
                 out_samples = accelerator.gather(samples.to(torch.float32))

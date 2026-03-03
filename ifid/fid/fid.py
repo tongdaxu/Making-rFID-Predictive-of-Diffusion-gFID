@@ -392,13 +392,14 @@ class FIDInceptionE_2(torchvision.models.inception.InceptionE):
         outputs = [branch1x1, branch3x3, branch3x3dbl, branch_pool]
         return torch.cat(outputs, 1)
 
+
 parser = ArgumentParser(formatter_class=ArgumentDefaultsHelpFormatter)
 parser.add_argument("--batch-size", type=int, default=50, help="Batch size to use")
 parser.add_argument(
     "--num-workers",
     type=int,
     help=(
-        "Number of processes to use for data loading. " "Defaults to `min(8, num_cpus)`"
+        "Number of processes to use for data loading. Defaults to `min(8, num_cpus)`"
     ),
 )
 parser.add_argument(
@@ -410,8 +411,7 @@ parser.add_argument(
     default=2048,
     choices=list(InceptionV3.BLOCK_INDEX_BY_DIM),
     help=(
-        "Dimensionality of Inception features to use. "
-        "By default, uses pool3 features"
+        "Dimensionality of Inception features to use. By default, uses pool3 features"
     ),
 )
 parser.add_argument(
@@ -427,7 +427,7 @@ parser.add_argument(
     "path",
     type=str,
     nargs=2,
-    help=("Paths to the generated images or " "to .npz statistic files"),
+    help=("Paths to the generated images or to .npz statistic files"),
 )
 
 IMAGE_EXTENSIONS = {"bmp", "jpg", "jpeg", "pgm", "png", "ppm", "tif", "tiff", "webp"}
@@ -498,10 +498,9 @@ def get_activations(
     for batch in tqdm(dataloader):
         batch = batch.to(device)
 
-        if type(model).__name__ == 'InceptionV3':
+        if type(model).__name__ == "InceptionV3":
             with torch.no_grad():
                 pred = model(batch)[0]
-
 
             # If model output is not scalar, apply global spatial average pooling.
             # This happens if you choose a dimensionality not equal 2048.
@@ -549,12 +548,12 @@ def calculate_frechet_distance(mu1, sigma1, mu2, sigma2, eps=1e-6):
     sigma1 = np.atleast_2d(sigma1)
     sigma2 = np.atleast_2d(sigma2)
 
-    assert (
-        mu1.shape == mu2.shape
-    ), "Training and test mean vectors have different lengths"
-    assert (
-        sigma1.shape == sigma2.shape
-    ), "Training and test covariances have different dimensions"
+    assert mu1.shape == mu2.shape, (
+        "Training and test mean vectors have different lengths"
+    )
+    assert sigma1.shape == sigma2.shape, (
+        "Training and test covariances have different dimensions"
+    )
 
     diff = mu1 - mu2
 
@@ -607,7 +606,9 @@ def calculate_activation_statistics(
     return mu, sigma
 
 
-def compute_statistics_of_path(path, model, batch_size, dims, device, num_workers=1, sp_len=None):
+def compute_statistics_of_path(
+    path, model, batch_size, dims, device, num_workers=1, sp_len=None
+):
     if path.endswith(".npz"):
         with np.load(path) as f:
             m, s = f["mu"][:], f["sigma"][:]
@@ -626,12 +627,20 @@ def compute_statistics_of_path(path, model, batch_size, dims, device, num_worker
     return m, s
 
 
-def calculate_fid_given_paths(paths, batch_size, device, dims, num_workers=1, model_name="inception_v3", sp_len=None):
+def calculate_fid_given_paths(
+    paths,
+    batch_size,
+    device,
+    dims,
+    num_workers=1,
+    model_name="inception_v3",
+    sp_len=None,
+):
     """Calculates the FID of two paths"""
     for p in paths:
         if not os.path.exists(p):
             raise RuntimeError("Invalid path: %s" % p)
-        
+
     if model_name == "inception_v3":
         block_idx = InceptionV3.BLOCK_INDEX_BY_DIM[dims]
         model = InceptionV3([block_idx]).to(device)

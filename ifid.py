@@ -1,6 +1,6 @@
 import os
 from PIL import Image
-from torch.utils.data import Dataset, DataLoader
+from torch.utils.data import DataLoader
 from torchvision import transforms
 from accelerate import Accelerator
 from accelerate.utils import set_seed
@@ -13,17 +13,16 @@ from ifid.fid.fid import InceptionV3, calculate_frechet_distance
 from ifid.dataset import ImageNetValDataset
 from torch.nn.functional import adaptive_avg_pool2d
 import torch.distributed as dist
-import random
-import sys
 from omegaconf import OmegaConf
 from ifid.vae.utils import instantiate_from_config
 
+
 def cosine_similarity_chunked(
-    t1_cpu,          # (B1, C) on CPU
-    t2_cpu,          # (B2, C) on CPU or GPU
+    t1_cpu,  # (B1, C) on CPU
+    t2_cpu,  # (B2, C) on CPU or GPU
     chunk_size=20000,
     device="cuda",
-    dtype=torch.float16,   # fp16/bf16 recommended
+    dtype=torch.float16,  # fp16/bf16 recommended
 ):
     """
     Returns cosine similarity matrix of shape (B1, B2)
@@ -56,7 +55,7 @@ def cosine_similarity_chunked(
         t1_chunk = F.normalize(t1_chunk, dim=1)
 
         # Compute cosine similarity via matmul
-        sim_chunk = t1_chunk @ t2.T   # (chunk, B2)
+        sim_chunk = t1_chunk @ t2.T  # (chunk, B2)
 
         # Move back to CPU
         sim_out[start:end] = sim_chunk.cpu()
@@ -66,6 +65,7 @@ def cosine_similarity_chunked(
 
     return sim_out
 
+
 # -------------------------
 # Args
 # -------------------------
@@ -73,7 +73,9 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--vae-config", type=str, default="")
     parser.add_argument("--seed", type=int, default=0)
-    parser.add_argument("--intp", type=str, default="slerp", choices=["linear", "slerp", "mask"])
+    parser.add_argument(
+        "--intp", type=str, default="slerp", choices=["linear", "slerp", "mask"]
+    )
     parser.add_argument("--alpha", type=float, default=0.5)
     parser.add_argument("--exp-name", type=str, default="ifid")
     parser.add_argument("--small", type=int, default=-1)
@@ -123,6 +125,7 @@ def slerp(z1, z2, t, eps=1e-7):
 
     return zt.reshape_as(z1)
 
+
 # -------------------------
 # Main
 # -------------------------
@@ -146,18 +149,20 @@ def main(args):
     device = accelerator.device
     set_seed(args.seed + accelerator.process_index)
 
-    transform = transforms.Compose([
-        transforms.Resize(256),
-        transforms.CenterCrop(256),
-        transforms.ToTensor(),
-        transforms.Normalize([0.5]*3, [0.5]*3),
-    ])
+    transform = transforms.Compose(
+        [
+            transforms.Resize(256),
+            transforms.CenterCrop(256),
+            transforms.ToTensor(),
+            transforms.Normalize([0.5] * 3, [0.5] * 3),
+        ]
+    )
 
     train_set = ImageNetValDataset(args.dataset, transform, args.small)
-    val_set   = ImageNetValDataset(args.dataset_ref, transform)
+    val_set = ImageNetValDataset(args.dataset_ref, transform)
 
     train_loader = DataLoader(train_set, batch_size=25, shuffle=False, num_workers=8)
-    val_loader   = DataLoader(val_set, batch_size=25, shuffle=False, num_workers=8)
+    val_loader = DataLoader(val_set, batch_size=25, shuffle=False, num_workers=8)
 
     vae_config = OmegaConf.load(args.vae_config)
     vae = instantiate_from_config(vae_config).to(device)
@@ -168,15 +173,15 @@ def main(args):
     block_idx = InceptionV3.BLOCK_INDEX_BY_DIM[2048]
     inception = InceptionV3([block_idx]).to(device).eval()
 
-    train_loader, vae, inception = accelerator.prepare(
-        train_loader, vae, inception
-    )
+    train_loader, vae, inception = accelerator.prepare(train_loader, vae, inception)
 
     # -------------------------
     # Encode training latents (SHARDED)
     # -------------------------
     zs, ys = [], []
-    for img, y, name in tqdm(train_loader, disable=not accelerator.is_local_main_process):
+    for img, y, name in tqdm(
+        train_loader, disable=not accelerator.is_local_main_process
+    ):
         img = img.to(device)
         y = y.to(device)
         with torch.no_grad():
@@ -186,7 +191,7 @@ def main(args):
         zs.append(z)
         ys.append(y)
 
-    zs = torch.cat(zs, dim=0)           # LOCAL shard only
+    zs = torch.cat(zs, dim=0)  # LOCAL shard only
     ys = torch.cat(ys, dim=0)
     zs_flat = zs.reshape(zs.shape[0], -1)
 
@@ -211,8 +216,8 @@ def main(args):
         # ---- local distance ----
         if args.intp == "linear":
             cost = (
-                (zs_flat ** 2).sum(1)[:, None]
-                + (z_flat ** 2).sum(1)[None]
+                (zs_flat**2).sum(1)[:, None]
+                + (z_flat**2).sum(1)[None]
                 - 2 * zs_flat @ z_flat.T
             )
         else:
@@ -226,8 +231,7 @@ def main(args):
             else:
                 dot = zs_flat @ z_flat.T
                 cos = dot / (
-                    zs_flat.norm(dim=1)[:, None] *
-                    z_flat.norm(dim=1)[None] + 1e-8
+                    zs_flat.norm(dim=1)[:, None] * z_flat.norm(dim=1)[None] + 1e-8
                 )
                 cost = -cos
 
@@ -245,12 +249,12 @@ def main(args):
         )  # both are [K, B]
 
         # gather costs
-        all_cost = accelerator.gather(local_cost)  
+        all_cost = accelerator.gather(local_cost)
         all_cost = all_cost.reshape(world_size, K, -1)  # [G, K, B]
 
         # gather indices
         all_idx = accelerator.gather(local_idx)
-        all_idx = all_idx.reshape(world_size, K, -1)    # [G, K, B]
+        all_idx = all_idx.reshape(world_size, K, -1)  # [G, K, B]
 
         # flatten GPU and K dims
         all_cost_flat = all_cost.permute(2, 0, 1).reshape(z.shape[0], -1)
@@ -260,12 +264,10 @@ def main(args):
             all_cost_flat, k=K, dim=1, largest=False
         )  # [B, K]
 
-        gpu_id = global_pos // K          # [B, K]
-        local_k = global_pos % K          # [B, K]
+        gpu_id = global_pos // K  # [B, K]
+        local_k = global_pos % K  # [B, K]
 
-        znn_candidate = torch.zeros(
-            z.shape[0], K, *zs.shape[1:], device=device
-        )
+        znn_candidate = torch.zeros(z.shape[0], K, *zs.shape[1:], device=device)
 
         if args.cpu:
             znn_candidate = znn_candidate.cpu().to(torch.bfloat16)
@@ -284,7 +286,7 @@ def main(args):
 
         dist.all_reduce(znn_candidate, op=dist.ReduceOp.SUM)
         znn_candidate_flat = znn_candidate.reshape(z.shape[0], K, -1)
-        local_cost = torch.mean((z_flat[:,None] - znn_candidate_flat)**2, dim=-1)
+        local_cost = torch.mean((z_flat[:, None] - znn_candidate_flat) ** 2, dim=-1)
         local_cost = local_cost.to(torch.float32)
         weights = torch.softmax(-local_cost, dim=1)  # [B, K]
 
@@ -298,8 +300,10 @@ def main(args):
         znn_idx = cat_dist.sample()
         weights = F.one_hot(znn_idx, num_classes=K)
         if args.cpu:
-            weights = weights.to(torch.bfloat16) 
-        znn = torch.sum(weights[:,:,None] * znn_candidate_flat,dim=1).reshape(*z.shape)
+            weights = weights.to(torch.bfloat16)
+        znn = torch.sum(weights[:, :, None] * znn_candidate_flat, dim=1).reshape(
+            *z.shape
+        )
 
         # ---- interpolate ----
         if args.intp == "linear":
@@ -307,15 +311,15 @@ def main(args):
         elif args.intp == "slerp":
             z_intp = slerp(z, znn, args.alpha)
         elif args.intp == "mask":
-            if len(z.shape)==4:
+            if len(z.shape) == 4:
                 mask = torch.zeros([z.shape[0], 1, z.shape[2], z.shape[3]]).to(device)
-                mask[:,:,:z.shape[2]//2,:] += 1
+                mask[:, :, : z.shape[2] // 2, :] += 1
             else:
                 mask = torch.zeros([z.shape[0], z.shape[1], 1]).to(device)
-                mask[:,:z.shape[1]//2,:] += 1
+                mask[:, : z.shape[1] // 2, :] += 1
             z_intp = (1 - mask) * z + mask * znn
         else:
-            assert(0)
+            assert 0
         # ---- decode + inception ----
         with torch.no_grad():
             img_in = img
@@ -329,19 +333,30 @@ def main(args):
             img_nn = (img_nn + 1) / 2
 
             if args.save:
-
-                img_nn_np = torch.clamp(
-                    255. * img_nn, 0, 255
-                ).permute(0, 2, 3, 1).to("cpu", dtype=torch.uint8).numpy()
-                img_recon_np = torch.clamp(
-                    255. * img_recon, 0, 255
-                ).permute(0, 2, 3, 1).to("cpu", dtype=torch.uint8).numpy()
-                img_in_np = torch.clamp(
-                    255. * img_in, 0, 255
-                ).permute(0, 2, 3, 1).to("cpu", dtype=torch.uint8).numpy()
-                img_intp_np = torch.clamp(
-                    255. * img_intp, 0, 255
-                ).permute(0, 2, 3, 1).to("cpu", dtype=torch.uint8).numpy()
+                img_nn_np = (
+                    torch.clamp(255.0 * img_nn, 0, 255)
+                    .permute(0, 2, 3, 1)
+                    .to("cpu", dtype=torch.uint8)
+                    .numpy()
+                )
+                img_recon_np = (
+                    torch.clamp(255.0 * img_recon, 0, 255)
+                    .permute(0, 2, 3, 1)
+                    .to("cpu", dtype=torch.uint8)
+                    .numpy()
+                )
+                img_in_np = (
+                    torch.clamp(255.0 * img_in, 0, 255)
+                    .permute(0, 2, 3, 1)
+                    .to("cpu", dtype=torch.uint8)
+                    .numpy()
+                )
+                img_intp_np = (
+                    torch.clamp(255.0 * img_intp, 0, 255)
+                    .permute(0, 2, 3, 1)
+                    .to("cpu", dtype=torch.uint8)
+                    .numpy()
+                )
                 for j, sample in enumerate(img_in_np):
                     Image.fromarray(sample).save(f"{src_dir}/{name[j]}")
                 for j, sample in enumerate(img_recon_np):
@@ -359,16 +374,16 @@ def main(args):
                 pred_intp = adaptive_avg_pool2d(pred_intp, (1, 1))
             pred_arr_in.append(pred_in.squeeze(-1).squeeze(-1).cpu().numpy())
             pred_arr_znn.append(pred_intp.squeeze(-1).squeeze(-1).cpu().numpy())
-    
+
     pred_arr_in = np.concatenate(pred_arr_in)
     pred_arr_znn = np.concatenate(pred_arr_znn)
 
-    pred_arr_in = accelerator.gather(
-        torch.from_numpy(pred_arr_in).to(device)
-    ).cpu().numpy()
-    pred_arr_znn = accelerator.gather(
-        torch.from_numpy(pred_arr_znn).to(device)
-    ).cpu().numpy()
+    pred_arr_in = (
+        accelerator.gather(torch.from_numpy(pred_arr_in).to(device)).cpu().numpy()
+    )
+    pred_arr_znn = (
+        accelerator.gather(torch.from_numpy(pred_arr_znn).to(device)).cpu().numpy()
+    )
 
     if accelerator.is_main_process:
         mu_in = pred_arr_in.mean(0)
@@ -379,7 +394,7 @@ def main(args):
 
         fid = calculate_frechet_distance(mu_in, sigma_in, mu_znn, sigma_znn)
 
-        print('ifid=',fid)
+        print("ifid=", fid)
 
 
 if __name__ == "__main__":

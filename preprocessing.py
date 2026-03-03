@@ -34,7 +34,7 @@ def file_ext(name: Union[str, Path]) -> str:
 def is_image_ext(fname: Union[str, Path]) -> bool:
     """Check if the extension is recognized by Pillow."""
     ext = file_ext(fname).lower()
-    return f'.{ext}' in Image.EXTENSION
+    return f".{ext}" in Image.EXTENSION
 
 
 def maybe_min(a: int, b: Optional[int]) -> int:
@@ -59,14 +59,17 @@ def open_image_folder_fnames(source_dir: str, *, max_images: Optional[int]):
     max_idx = maybe_min(len(input_images), max_images)
 
     # Map absolute path -> rel path for label lookup
-    arch_fnames = {fname: os.path.relpath(fname, source_dir).replace('\\', '/') for fname in input_images}
+    arch_fnames = {
+        fname: os.path.relpath(fname, source_dir).replace("\\", "/")
+        for fname in input_images
+    }
 
     # Load labels from dataset.json if present
     labels = {}
-    meta_fname = os.path.join(source_dir, 'dataset.json')
+    meta_fname = os.path.join(source_dir, "dataset.json")
     if os.path.isfile(meta_fname):
-        with open(meta_fname, 'r') as f:
-            data = json.load(f).get('labels', None)
+        with open(meta_fname, "r") as f:
+            data = json.load(f).get("labels", None)
             if data is not None:
                 # data: list of [rel_path, class_idx]
                 labels = {x[0]: x[1] for x in data}
@@ -76,12 +79,14 @@ def open_image_folder_fnames(source_dir: str, *, max_images: Optional[int]):
         toplevel_names = {}
         for fname in input_images:
             arch = arch_fnames[fname]
-            top = arch.split('/')[0] if '/' in arch else ''
+            top = arch.split("/")[0] if "/" in arch else ""
             toplevel_names[arch] = top
         unique_toplevels = sorted(set(toplevel_names.values()))
         if len(unique_toplevels) > 1:
             toplevel_indices = {n: i for i, n in enumerate(unique_toplevels)}
-            labels = {arch: toplevel_indices[toplevel_names[arch]] for arch in toplevel_names}
+            labels = {
+                arch: toplevel_indices[toplevel_names[arch]] for arch in toplevel_names
+            }
 
     # Build list of (filename, label)
     out = []
@@ -108,7 +113,7 @@ def read_image(input_: str) -> np.ndarray:
     Return None if something fails.
     """
     with Image.open(input_) as im:
-        return np.array(im.convert('RGB'))
+        return np.array(im.convert("RGB"))
 
 
 def _process_single_image(args):
@@ -137,7 +142,9 @@ def _process_single_image(args):
     exp_h = check_dims["height"]
     h, w, c = img.shape
     if (w != exp_w) or (h != exp_h):
-        raise RuntimeError(f"[ERROR] Dimension mismatch: got {w}x{h}, expected {exp_w}x{exp_h}.")
+        raise RuntimeError(
+            f"[ERROR] Dimension mismatch: got {w}x{h}, expected {exp_w}x{exp_h}."
+        )
 
     # 4) Encode as uncompressed PNG in memory
     idx_str = f"{global_idx:08d}"
@@ -158,7 +165,7 @@ def create_dataset_in_group(h5file, full_path, data):
     """
     parts = full_path.strip("/").split("/")
     if len(parts) == 1:
-        h5file.create_dataset(full_path, data=np.array(data, dtype='S'))
+        h5file.create_dataset(full_path, data=np.array(data, dtype="S"))
     else:
         grp = h5file
         for part in parts[:-1]:
@@ -166,21 +173,29 @@ def create_dataset_in_group(h5file, full_path, data):
                 grp = grp.create_group(part)
             else:
                 grp = grp[part]
-        grp.create_dataset(parts[-1], data=np.array(data, dtype='S'))
+        grp.create_dataset(parts[-1], data=np.array(data, dtype="S"))
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument("--imagenet-path", type=str, required=True,
-                        help="Path to the ImageNet dataset")
-    parser.add_argument("--output-path", type=str, default="data",
-                        help="Path to the output HDF5 file")
-    parser.add_argument("--resolution", type=int, default=128,
-                        help="Preprocessing image resolution")
-    parser.add_argument("--num-workers", type=int, default=16,
-                        help="Number of workers to use")
-    parser.add_argument("--max-images", type=int, default=None,
-                        help="Maximum number of images to process")
+    parser.add_argument(
+        "--imagenet-path", type=str, required=True, help="Path to the ImageNet dataset"
+    )
+    parser.add_argument(
+        "--output-path", type=str, default="data", help="Path to the output HDF5 file"
+    )
+    parser.add_argument(
+        "--resolution", type=int, default=128, help="Preprocessing image resolution"
+    )
+    parser.add_argument(
+        "--num-workers", type=int, default=16, help="Number of workers to use"
+    )
+    parser.add_argument(
+        "--max-images",
+        type=int,
+        default=None,
+        help="Maximum number of images to process",
+    )
     args = parser.parse_args()
 
     # Initialize the PIL library.
@@ -193,7 +208,9 @@ if __name__ == "__main__":
 
     # Gather image filenames/labels from the source directory.
     print("Gathering image filenames/labels...")
-    num_files, file_label_pairs = open_image_folder_fnames(args.imagenet_path, max_images=args.max_images)
+    num_files, file_label_pairs = open_image_folder_fnames(
+        args.imagenet_path, max_images=args.max_images
+    )
     print(f"Found {num_files} images (possibly truncated by --max-images).")
 
     # Use one sample to check dimensions.
@@ -224,7 +241,7 @@ if __name__ == "__main__":
             for global_idx, data in tqdm(
                 pool.imap(_process_single_image, tasks, chunksize=32),
                 total=len(tasks),
-                desc="Processing"
+                desc="Processing",
             ):
                 if data is None:
                     continue

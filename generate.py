@@ -28,11 +28,12 @@ from tqdm import tqdm
 import shutil
 
 from ifid.sit.sit import SiT_models
-from ifid.sit.samplers import euler_sampler, euler_maruyama_sampler
+from ifid.sit.samplers import euler_maruyama_sampler
 from train import denormalize_latents
 from datetime import timedelta
 from omegaconf import OmegaConf
 from ifid.vae.utils import instantiate_from_config
+
 
 def create_npz_from_sample_folder(sample_dir, num=50_000):
     """
@@ -55,22 +56,28 @@ def main(args):
     """
     Run sampling.
     """
-    torch.backends.cuda.matmul.allow_tf32 = args.tf32  # True: fast but may lead to some small numerical differences
-    assert torch.cuda.is_available(), "Sampling with DDP requires at least one GPU. sample.py supports CPU-only usage"
+    torch.backends.cuda.matmul.allow_tf32 = (
+        args.tf32
+    )  # True: fast but may lead to some small numerical differences
+    assert torch.cuda.is_available(), (
+        "Sampling with DDP requires at least one GPU. sample.py supports CPU-only usage"
+    )
     torch.set_grad_enabled(False)
 
     # Setup DDP
     dist.init_process_group("nccl", timeout=timedelta(minutes=60))
     rank = dist.get_rank()
     device = rank % torch.cuda.device_count()
-    seed = (args.global_seed + rank) * dist.get_world_size()//2
+    seed = (args.global_seed + rank) * dist.get_world_size() // 2
     torch.manual_seed(seed)
     torch.cuda.set_device(device)
     print(f"Starting rank={rank}, seed={seed}, world_size={dist.get_world_size()}.")
 
     if args.exp_path is None or args.train_steps is None:
         if rank == 0:
-            print("The `exp_path` or `train_steps` is not provided, setting `exp_path` and `train_steps` to default values.")
+            print(
+                "The `exp_path` or `train_steps` is not provided, setting `exp_path` and `train_steps` to default values."
+            )
         args.exp_path = "pretrained/sit-xl-dinov2-b-enc8-repae-sdvae-0.5-1.5-400k"
         args.train_steps = 400_000
 
@@ -84,25 +91,25 @@ def main(args):
     for name, param in vae.named_parameters():
         param.requires_grad_(False)
 
-    fake_in = torch.zeros([1,3,config.resolution,config.resolution]).to(device)
+    fake_in = torch.zeros([1, 3, config.resolution, config.resolution]).to(device)
     fake_z = vae.encode(fake_in)[0]
 
     if len(fake_z.shape) == 3:
         # 2d latent
         latent_size = fake_z.shape[-1]
         in_channels = fake_z.shape[0]
-        xT = torch.randn((n, in_channels, latent_size, latent_size), device=device)
+        torch.randn((n, in_channels, latent_size, latent_size), device=device)
         vae_1d = False
     elif len(fake_z.shape) == 2:
         # 1d latent
         latent_size = fake_z.shape[0]
         in_channels = fake_z.shape[-1]
-        xT = torch.randn((n, latent_size, in_channels), device=device)
+        torch.randn((n, latent_size, in_channels), device=device)
         vae_1d = True
     else:
-        assert(0)
+        assert 0
 
-    tshift = math.sqrt(float(fake_z.numel())/4096.0)
+    tshift = math.sqrt(float(fake_z.numel()) / 4096.0)
     print("using time shift {0:.4f}".format(tshift))
 
     block_kwargs = {"fused_attn": config.fused_attn, "qk_norm": config.qk_norm}
@@ -119,18 +126,32 @@ def main(args):
     exp_name = os.path.basename(args.exp_path)
     train_step_str = str(args.train_steps).zfill(7)
     state_dict = torch.load(
-        os.path.join(args.exp_path, "checkpoints", train_step_str +'.pt'),
+        os.path.join(args.exp_path, "checkpoints", train_step_str + ".pt"),
         map_location=f"cuda:{device}",
     )
-    model.load_state_dict(state_dict['ema'])
+    model.load_state_dict(state_dict["ema"])
     model.eval()  # Important! To disable label dropout during sampling
 
-    if vae_1d == True:
-        latents_scale = state_dict["ema"]["bn.running_var"].rsqrt().view(1, 1, in_channels).to(device)
-        latents_bias = state_dict["ema"]["bn.running_mean"].view(1, 1, in_channels).to(device)
+    if vae_1d:
+        latents_scale = (
+            state_dict["ema"]["bn.running_var"]
+            .rsqrt()
+            .view(1, 1, in_channels)
+            .to(device)
+        )
+        latents_bias = (
+            state_dict["ema"]["bn.running_mean"].view(1, 1, in_channels).to(device)
+        )
     else:
-        latents_scale = state_dict["ema"]["bn.running_var"].rsqrt().view(1, in_channels, 1, 1).to(device)
-        latents_bias = state_dict["ema"]["bn.running_mean"].view(1, in_channels, 1, 1).to(device)
+        latents_scale = (
+            state_dict["ema"]["bn.running_var"]
+            .rsqrt()
+            .view(1, in_channels, 1, 1)
+            .to(device)
+        )
+        latents_bias = (
+            state_dict["ema"]["bn.running_mean"].view(1, in_channels, 1, 1).to(device)
+        )
 
     del state_dict
     gc.collect()
@@ -145,35 +166,47 @@ def main(args):
     n = args.pproc_batch_size
     global_batch_size = n * dist.get_world_size()
     # To make things evenly-divisible, we'll sample a bit more than we need and then discard the extra samples:
-    total_samples = int(math.ceil(args.num_fid_samples / global_batch_size) * global_batch_size)
+    total_samples = int(
+        math.ceil(args.num_fid_samples / global_batch_size) * global_batch_size
+    )
     if rank == 0:
         print(sample_folder_dir)
         print(f"Total number of images that will be sampled: {total_samples}")
         print(f"SiT Parameters: {sum(p.numel() for p in model.parameters()):,}")
-        print(f"projector Parameters: {sum(p.numel() for p in model.projectors.parameters()):,}")
-    assert total_samples % dist.get_world_size() == 0, "total_samples must be divisible by world_size"
+        print(
+            f"projector Parameters: {sum(p.numel() for p in model.projectors.parameters()):,}"
+        )
+    assert total_samples % dist.get_world_size() == 0, (
+        "total_samples must be divisible by world_size"
+    )
     samples_needed_this_gpu = int(total_samples // dist.get_world_size())
-    assert samples_needed_this_gpu % n == 0, "samples_needed_this_gpu must be divisible by the per-GPU batch size"
+    assert samples_needed_this_gpu % n == 0, (
+        "samples_needed_this_gpu must be divisible by the per-GPU batch size"
+    )
     iterations = int(samples_needed_this_gpu // n)
     pbar = range(iterations)
     pbar = tqdm(pbar) if rank == 0 else pbar
     total = 0
     for _ in pbar:
         # Sample inputs:
-        if vae_1d == True:
+        if vae_1d:
             z = torch.randn(n, latent_size, model.in_channels, device=device)
         else:
-            z = torch.randn(n, model.in_channels, latent_size, latent_size, device=device)
+            z = torch.randn(
+                n, model.in_channels, latent_size, latent_size, device=device
+            )
         y = torch.randint(0, config.num_classes, (n,), device=device)
 
-        assert not args.heun or args.mode == "ode", "Heun's method is only available for ODE sampling."
+        assert not args.heun or args.mode == "ode", (
+            "Heun's method is only available for ODE sampling."
+        )
 
         # Sample images:
         sampling_kwargs = dict(
-            model=model, 
+            model=model,
             latents=z,
             y=y,
-            num_steps=args.num_steps, 
+            num_steps=args.num_steps,
             heun=args.heun,
             cfg_scale=args.cfg_scale,
             guidance_low=args.guidance_low,
@@ -187,11 +220,16 @@ def main(args):
             else:
                 raise NotImplementedError()
 
-            samples = vae.decode(denormalize_latents(samples, latents_scale, latents_bias))
-            samples = (samples + 1) / 2.
-            samples = torch.clamp(
-                255. * samples, 0, 255
-            ).permute(0, 2, 3, 1).to("cpu", dtype=torch.uint8).numpy()
+            samples = vae.decode(
+                denormalize_latents(samples, latents_scale, latents_bias)
+            )
+            samples = (samples + 1) / 2.0
+            samples = (
+                torch.clamp(255.0 * samples, 0, 255)
+                .permute(0, 2, 3, 1)
+                .to("cpu", dtype=torch.uint8)
+                .numpy()
+            )
 
             # Save samples to disk as individual .png files
             for i, sample in enumerate(samples):
@@ -205,18 +243,19 @@ def main(args):
         # create_npz_from_sample_folder(sample_folder_dir, args.num_fid_samples)
         # print("create npz done.")
         from ifid.fid.fid import calculate_fid_given_paths
+
         fid_num = args.num_fid_samples
-        print('Calculating FID with {} number of samples'.format(fid_num))
+        print("Calculating FID with {} number of samples".format(fid_num))
         fid_reference_file = args.fid_reference_file
         fid = calculate_fid_given_paths(
             [fid_reference_file, sample_folder_dir],
             batch_size=50,
             dims=2048,
-            device='cuda',
+            device="cuda",
             num_workers=8,
-            sp_len = fid_num
+            sp_len=fid_num,
         )
-        print('fid=',fid)
+        print("fid=", fid)
         shutil.rmtree(sample_folder_dir)
     dist.barrier()
     dist.destroy_process_group()
@@ -228,15 +267,29 @@ if __name__ == "__main__":
     parser.add_argument("--global-seed", type=int, default=0)
 
     # precision params
-    parser.add_argument("--tf32", action=argparse.BooleanOptionalAction, default=True,
-                        help="By default, use TF32 matmuls. This massively accelerates sampling on Ampere GPUs.")
+    parser.add_argument(
+        "--tf32",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="By default, use TF32 matmuls. This massively accelerates sampling on Ampere GPUs.",
+    )
 
     # logging/saving params
     parser.add_argument("--sample-dir", type=str, default="samples")
 
     # ckpt params
-    parser.add_argument("--exp-path", type=str, default=None, help="Path to the specific experiment directory.")
-    parser.add_argument("--train-steps", type=str, default=None, help="The checkpoint of the model to sample from.")
+    parser.add_argument(
+        "--exp-path",
+        type=str,
+        default=None,
+        help="Path to the specific experiment directory.",
+    )
+    parser.add_argument(
+        "--train-steps",
+        type=str,
+        default=None,
+        help="The checkpoint of the model to sample from.",
+    )
 
     # number of samples
     parser.add_argument("--pproc-batch-size", type=int, default=64)
@@ -244,13 +297,19 @@ if __name__ == "__main__":
 
     # sampling related hyperparameters
     parser.add_argument("--mode", type=str, default="ode")
-    parser.add_argument("--cfg-scale",  type=float, default=1.5)
-    parser.add_argument("--path-type", type=str, default="linear", choices=["linear", "cosine"])
+    parser.add_argument("--cfg-scale", type=float, default=1.5)
+    parser.add_argument(
+        "--path-type", type=str, default="linear", choices=["linear", "cosine"]
+    )
     parser.add_argument("--num-steps", type=int, default=50)
-    parser.add_argument("--heun", action=argparse.BooleanOptionalAction, default=False,
-                        help="Use Heun's method for ODE sampling.")
-    parser.add_argument("--guidance-low", type=float, default=0.)
-    parser.add_argument("--guidance-high", type=float, default=1.)
+    parser.add_argument(
+        "--heun",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Use Heun's method for ODE sampling.",
+    )
+    parser.add_argument("--guidance-low", type=float, default=0.0)
+    parser.add_argument("--guidance-high", type=float, default=1.0)
     parser.add_argument("--fid-reference-file", type=str, default="")
 
     args = parser.parse_args()
