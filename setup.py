@@ -6,6 +6,7 @@ setup(
     packages=[
         "ifid",
         "ifid.sit",
+        "ifid.fid",
         "ifid.vae",
         "ifid.vae.continous_tokenizer",
         "ifid.vae.rae_module",

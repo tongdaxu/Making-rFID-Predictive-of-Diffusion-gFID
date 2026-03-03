@@ -6,6 +6,7 @@ import json
 import math
 from pathlib import Path
 from collections import OrderedDict
+from omegaconf import OmegaConf
 
 from accelerate import Accelerator
 from accelerate.logging import get_logger
@@ -16,10 +17,11 @@ from torchvision.utils import make_grid
 from tqdm.auto import tqdm
 import wandb
 
-from dataset import CustomINH5Dataset
-from models.autoencoder import vae_models
+from ifid.dataset import CustomINH5Dataset
 from ifid.sit.sit import SiT_models
 from ifid.sit.samplers import euler_sampler
+from ifid.vae.utils import instantiate_from_config
+
 from accelerate.utils import DistributedDataParallelKwargs
 
 
@@ -172,97 +174,29 @@ def main(args):
     n = ys.size(0)
 
     # Create model:
-    if args.vae == "f8d4" or args.vae == "f8d4flow":
-        # 4*32*32 = 4096
-        assert args.resolution % 8 == 0, (
-            "Image size must be divisible by 8 (for the VAE encoder)."
-        )
-        latent_size = args.resolution // 8
-        in_channels = 4
-        xT = torch.randn((n, in_channels, latent_size, latent_size), device=device)
-        tshift = 1.0
-    elif (
-        args.vae == "flux"
-        or args.vae == "fluxflow"
-        or args.vae == "wan"
-        or args.vae == "wanflow"
-        or args.vae == "sd3"
-        or args.vae == "sd3flow"
-        or args.vae == "qw"
-    ):
-        # 16*32*32 = 16384
-        assert args.resolution % 8 == 0, (
-            "Image size must be divisible by 8 (for the VAE encoder)."
-        )
-        latent_size = args.resolution // 8
-        in_channels = 16
-        xT = torch.randn((n, in_channels, latent_size, latent_size), device=device)
-        tshift = 2.0
-    elif args.vae == "f16d32" or args.vae == "f16d32flow":
-        # 16*16*16 = 4096
-        assert args.resolution % 16 == 0, (
-            "Image size must be divisible by 16 (for the VAE encoder)."
-        )
-        latent_size = args.resolution // 16
-        in_channels = 32
-        xT = torch.randn((n, in_channels, latent_size, latent_size), device=device)
-        tshift = 1.0
-    elif args.vae == "f16d64":
-        # 16*16*16 = 8192
-        assert args.resolution % 16 == 0, (
-            "Image size must be divisible by 16 (for the VAE encoder)."
-        )
-        latent_size = args.resolution // 16
-        in_channels = 64
-        xT = torch.randn((n, in_channels, latent_size, latent_size), device=device)
-        tshift = 1.41
-    elif args.vae == "f8d16" or args.vae == "f8d16flow":
-        # 16*32*32 = 16384
-        assert args.resolution % 8 == 0, (
-            "Image size must be divisible by 8 (for the VAE encoder)."
-        )
-        latent_size = args.resolution // 8
-        in_channels = 16
-        xT = torch.randn((n, in_channels, latent_size, latent_size), device=device)
-        tshift = 2.0
-    elif args.vae == "softvq":
-        # 2048
-        latent_size = 64
-        in_channels = 32
-        xT = torch.randn((n, latent_size, in_channels), device=device)
-        tshift = 0.71
-    elif args.vae == "maetok":
-        # 4096
-        latent_size = 128
-        in_channels = 32
-        xT = torch.randn((n, latent_size, in_channels), device=device)
-        tshift = 1.0
-    elif args.vae == "dmvae":
-        # 8192
-        latent_size = 256
-        in_channels = 32
-        xT = torch.randn((n, latent_size, in_channels), device=device)
-        tshift = 1.41
-    elif args.vae == "detok":
-        # 4096
-        latent_size = 256
-        in_channels = 16
-        xT = torch.randn((n, latent_size, in_channels), device=device)
-        tshift = 1.0
-    elif args.vae == "rae":
-        # 768*16*16 = 196608
-        assert args.resolution % 16 == 0, (
-            "Image size must be divisible by 16 (for the VAE encoder)."
-        )
-        latent_size = args.resolution // 16
-        in_channels = 768
-        xT = torch.randn((n, in_channels, latent_size, latent_size), device=device)
-        tshift = 6.93
-    else:
-        raise NotImplementedError()
+    vae_config = OmegaConf.load(args.vae_config)
+    vae = instantiate_from_config(vae_config).to(device)
+    vae.eval()
+    for name, param in vae.named_parameters():
+        param.requires_grad_(False)
 
-    if not args.shift:
-        tshift = 1.0
+    fake_in = torch.zeros([1,3,args.resolution,args.resolution]).to(device)
+    fake_z = vae.encode(fake_in)[0]
+
+    if len(fake_z.shape) == 3:
+        # 2d latent
+        latent_size = fake_z.shape[-1]
+        in_channels = fake_z.shape[0]
+        xT = torch.randn((n, in_channels, latent_size, latent_size), device=device)
+    elif len(fake_z.shape) == 2:
+        # 1d latent
+        latent_size = fake_z.shape[0]
+        in_channels = fake_z.shape[-1]
+        xT = torch.randn((n, latent_size, in_channels), device=device)
+    else:
+        assert(0)
+
+    tshift = math.sqrt(float(fake_z.numel())/4096.0)
 
     block_kwargs = {"fused_attn": args.fused_attn, "qk_norm": args.qk_norm}
     model = SiT_models[args.model](
@@ -281,31 +215,6 @@ def main(args):
         device
     )  # Create an EMA of the model for use after training
     requires_grad(ema, False)
-
-    # Load VAE and create a EMA of the VAE
-    vae = vae_models[args.vae]().to(device)
-
-    if os.path.exists(args.vae_ckpt):
-        vae_ckpt = torch.load(args.vae_ckpt, map_location=device)
-        if "state_dict" in vae_ckpt.keys():
-            vae_ckpt = vae_ckpt["state_dict"]
-        missing, unexpected = vae.load_state_dict(
-            vae_ckpt, strict=False
-        )  # We may not have the projection layer in the VAE
-        if accelerator.is_main_process:
-            print("missing keys", missing)
-            print("unexpected keys", unexpected)
-        del vae_ckpt
-    else:
-        vae_ckpt = None
-        print("VAE ckpt do not exist: ", args.vae_ckpt)
-
-    for name, param in vae.named_parameters():
-        if "flow" not in name:
-            param.requires_grad_(False)
-        else:
-            param.requires_grad_(True)
-    print("Total trainable params in VAE:", count_trainable_params(vae))
 
     # Apply SyncBN if more than 1 GPU is used
     if accelerator.use_distributed:
@@ -404,7 +313,7 @@ def main(args):
 
                 vae.eval()
                 with torch.no_grad():
-                    z, _ = vae(processed_image)
+                    z = vae.encode(processed_image)
                 # 2). Backward pass: VAE, compute the VAE loss, backpropagate, and update the VAE; Then, compute the riminator loss and update the discriminator
                 #    loss_kwargs used for SiT forward function, create here and can be reused for both VAE and SiT
                 loss_kwargs = dict(
@@ -527,7 +436,6 @@ def main(args):
                         .decode(
                             denormalize_latents(samples, latents_scale, latents_bias)
                         )
-                        .sample
                     )
                     samples = (samples + 1) / 2.0
                 out_samples = accelerator.gather(samples.to(torch.float32))
@@ -592,7 +500,6 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--allow-tf32", action=argparse.BooleanOptionalAction, default=True
     )
-    parser.add_argument("--shift", action=argparse.BooleanOptionalAction, default=False)
 
     parser.add_argument(
         "--mixed-precision", type=str, default="fp16", choices=["no", "fp16", "bf16"]
@@ -650,7 +557,6 @@ def parse_args(input_args=None):
         help="currently we only support v-prediction",
     )
     parser.add_argument("--cfg-prob", type=float, default=0.1)
-    parser.add_argument("--z-lam", type=float, default=1.0)
     parser.add_argument(
         "--weighting",
         default="uniform",
@@ -660,13 +566,7 @@ def parse_args(input_args=None):
     )
 
     # vae params
-    parser.add_argument("--vae", type=str, default="f8d4")
-    parser.add_argument(
-        "--vae-ckpt", type=str, default="pretrained/sdvae-f8d4/sdvae-f8d4.pt"
-    )
-
-    # vae training params
-    parser.add_argument("--vae-learning-rate", type=float, default=1e-4)
+    parser.add_argument("--vae-config", type=str, default="")
 
     if input_args is not None:
         args = parser.parse_args(input_args)
