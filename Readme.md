@@ -91,12 +91,10 @@
 * implement your vae in a separate py fite in ./ifid/vae/, add config file in ./configs/
 * submit a pull request
 
-
-accelerate launch --num_processes=4 --gpu_ids="0,1,2,3" ifid.py \
-    --seed=0 \
-    --sample-dir="./samples" \
-    --exp-name="ifid-sdvae" \
-    --dataset="/video_ssd/lpm/ImageNet/train" \
-    --dataset-ref="/video_ssd/lpm/ImageNet/val" \
-    --vae-config="./configs/SDVAE.yaml" \
-    --small 500
+## Thanks
+* Majority of SiT code comes from: https://github.com/End2End-Diffusion/REPA-E
+* VAE inference code comes from different repos, including:
+    * https://github.com/Hhhhhhao/continuous_tokenizer
+    * https://github.com/bytetriper/RAE
+    * https://github.com/imantdaunhawer/DMVAE
+    * https://github.com/Jiawei-Yang/DeTok
