@@ -1,0 +1,3 @@
+target: ifid.vae.detok.DETOKEXPORT
+params:
+  ckpt_path: jjiaweiyang/l-DeTok/detok-BB-gamm3.0-m0.7-decoder_tuned.pth

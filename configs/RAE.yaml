@@ -1,0 +1,3 @@
+target: ifid.vae.rae.RAE
+params:
+  rae_config: /video_ssd/kongzishang/xutongda/git/IFID/configs/rae_DINOv2-B.yaml

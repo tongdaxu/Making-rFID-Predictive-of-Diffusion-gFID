@@ -1,0 +1,3 @@
+target: ifid.vae.dmvae.DMVAEEXPORT
+params:
+  ckpt_path: sen-ye/dmvae/vae.pt
