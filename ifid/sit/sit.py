@@ -488,7 +488,7 @@ class SiT(nn.Module):
 
         for i, block in enumerate(self.blocks):
             # checkpoint
-            # x = checkpoint.checkpoint(block, x, c, use_reentrant=False)
+            # x = torch.utils.checkpoint.checkpoint(block, x, c, use_reentrant=False)
             x = block(x, c)  # (N, T, D)
 
         x = self.final_layer(x, c)  # (N, T, patch_size ** 2 * out_channels)

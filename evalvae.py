@@ -418,12 +418,12 @@ def main(args):
         ifid = calculate_frechet_distance(mu_in, sigma_in, mu_znn, sigma_znn)
         rfid = calculate_frechet_distance(mu_in, sigma_in, mu_rec, sigma_rec)
 
-        print("ifid={0:.4f}", ifid)
-        print("rfid={0:.4f}", rfid)
-        print("psnr={0:.4f}", np.mean(arr_psnr))
-        print("ssim={0:.4f}", np.mean(arr_ssim))
-        print("msssim={0:.4f}", np.mean(arr_msssim))
-        print("lpips={0:.4f}", np.mean(arr_lpips))
+        print("ifid={0:.4f}".format(ifid))
+        print("rfid={0:.4f}".format(rfid))
+        print("psnr={0:.4f}".format(np.mean(arr_psnr)))
+        print("ssim={0:.4f}".format(np.mean(arr_ssim)))
+        print("msssim={0:.4f}".format(np.mean(arr_msssim)))
+        print("lpips={0:.4f}".format(np.mean(arr_lpips)))
 
 
 if __name__ == "__main__":

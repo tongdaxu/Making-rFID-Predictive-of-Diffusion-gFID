@@ -1,6 +1,8 @@
 from transformers.configuration_utils import PretrainedConfig
-
-
+from transformers.activations import ACT2FN
+from transformers.utils import (
+    ModelOutput,
+)
 class ViTMAEConfig(PretrainedConfig):
     r"""
     This is the configuration class to store the configuration of a [`ViTMAEModel`]. It is used to instantiate an ViT

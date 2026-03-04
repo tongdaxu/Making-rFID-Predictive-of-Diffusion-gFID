@@ -10,7 +10,7 @@ params:
         dinov2_path: 'facebook/dinov2-with-registers-base'
         normalize: true
       encoder_trainable: true
-      decoder_config_path: 'unified_ae/configs/decoder/ViTXL'
+      decoder_config_path: '/video_ssd/kongzishang/xutongda/git/IFID/ifid/vae/unified_ae/configs/decoder/ViTXL'
       noise_tau: 0.8
       reshape_to_2d: true
       frequency_config:

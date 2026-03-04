@@ -7,14 +7,11 @@
 * ![alt text](./assets/cover.png "Title")
 
 ## Installation
-* install requirements
+* git clone and install:
     ```bash
-    TODO
-    ```
-* install by pip
-    ```bash
-    git clone ...
-    cd ...
+    git clone https://github.com/tongdaxu/Making-rFID-Predictive-of-Diffusion-gFID.git
+    cd Making-rFID-Predictive-of-Diffusion-gFID
+    pip install -r requirements.txt
     pip install -e .
     ```
 ## USAGE: iFID Evaluation
@@ -78,9 +75,9 @@
     | EQ-VAE       | 20.81 | 37.81 | 47.51 | EQVAE.yaml | SiT-XL/2, SiT-B/2 |
     | IN-VAE       | 25.65 | 49.17 | 41.06 | INVAE.yaml | SiT-XL/1, SiT-B/1 |
     | VA-VAE       | 8.57 | 17.63 | 19.57 | VAVAE.yaml | SiT-XL/1, SiT-B/1 |
-    | VA-VAE (c64) | 15.4 |               | 37.14 | VAVAE64.yaml | SiT-XL/1, SiT-B/1 |
+    | VA-VAE (c64) | 15.4 | 32.51 | 37.14 | VAVAE64.yaml | SiT-XL/1, SiT-B/1 |
     | SOFT-VQ      | 15.88 | 29.11 | 26.91 | SOFTVQ.yaml | SiT-XL/1D, SiT-B/1D |
-    | MAE-TOK      | 6.27 |               | 14.06 | MAETOK.yaml | SiT-XL/1D, SiT-B/1D |
+    | MAE-TOK      | 6.27 | 13.73 | 14.06 | MAETOK.yaml | SiT-XL/1D, SiT-B/1D |
     | DE-TOK       | 11.97 | 20.27 | 17.51 | DETOK.yaml | SiT-XL/1D, SiT-B/1D |
     | DM-VAE       | 4.65 | 8.69 | 8.14 | DMVAE.yaml | SiT-XL/1D, SiT-B/1D |
     | REPAE-VAE    | 12.95 | 26.06 | 36.70 | REPAEVAE.yaml | SiT-XL/2, SiT-B/2 |
@@ -93,8 +90,10 @@
 
 ## Thanks
 * Majority of SiT code comes from: https://github.com/End2End-Diffusion/REPA-E
-* VAE inference code comes from different repos, including:
+* VAE inference code comes from their repos, including:
     * https://github.com/Hhhhhhao/continuous_tokenizer
     * https://github.com/bytetriper/RAE
     * https://github.com/imantdaunhawer/DMVAE
     * https://github.com/Jiawei-Yang/DeTok
+    * https://github.com/WeichenFan/UAE
+    * https://github.com/shiml20/SVG/tree/main
