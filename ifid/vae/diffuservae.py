@@ -12,8 +12,6 @@ class DIFFUSERVAE(nn.Module):
     def encode(
         self,
         x,
-        return_reg_log=False,
-        unregularized=False,
     ):
         qzx = self.model.encode(x, return_dict=False)[0]
         z = qzx.sample()
@@ -34,8 +32,6 @@ class QWVAE(nn.Module):
     def encode(
         self,
         x,
-        return_reg_log=False,
-        unregularized=False,
     ):
         qzx = self.model.encode(x[:, :, None], return_dict=False)
         z = qzx[0].sample()[:, :, 0]

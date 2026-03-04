@@ -536,8 +536,6 @@ class DMVAEEXPORT(nn.Module):
     def encode(
         self,
         x,
-        return_reg_log=False,
-        unregularized=False,
     ):
         z = self.model.encode(x)
         return z

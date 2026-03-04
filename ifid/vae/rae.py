@@ -12,8 +12,6 @@ class RAE(nn.Module):
     def encode(
         self,
         x,
-        return_reg_log=False,
-        unregularized=False,
     ):
         # x -> [0, 1]
         x = (x + 1.0) / 2.0

@@ -22,7 +22,7 @@
   * You need to download the ImageNet dataset first
   * Then run the script:
     ```bash 
-    accelerate launch --num_processes=4 --gpu_ids="0,1,2,3" ifid.py \
+    accelerate launch --num_processes=4 --gpu_ids="0,1,2,3" evalvae.py \
         --seed=0 \
         --sample-dir="./samples" \
         --exp-name="ifid-sdvae" \
@@ -71,7 +71,7 @@
 
     |              | gFID SiT-XL w/o cfg | gFID SiT-B w/o cfg | iFID | VAE config | SiT config |
     |--------------|----------------|---------------|------| ---------------|------| 
-    | SD-VAE       | 25.91 |               | 59.91 | SDVAE.yaml | SiT-XL/2, SiT-B/2 |
+    | SD-VAE       | 25.91 | 46.74 | 59.91 | SDVAE.yaml | SiT-XL/2, SiT-B/2 |
     | FLUX-VAE     | 34.06 | 63.32 | 67.41 | FLUX.yaml | SiT-XL/2, SiT-B/2 |
     | QW-VAE       | 23.62 | 48.34 | 30.58 | QWVAE.yaml | SiT-XL/2, SiT-B/2 |
     | SD3-VAE      | 26.38 | 51.39 | 37.13 | SD3VAE.yaml | SiT-XL/2, SiT-B/2 |
@@ -79,11 +79,11 @@
     | IN-VAE       | 25.65 | 49.17 | 41.06 | INVAE.yaml | SiT-XL/1, SiT-B/1 |
     | VA-VAE       | 8.57 | 17.63 | 19.57 | VAVAE.yaml | SiT-XL/1, SiT-B/1 |
     | VA-VAE (c64) | 15.4 |               | 37.14 | VAVAE64.yaml | SiT-XL/1, SiT-B/1 |
-    | SOFT-VQ      | 15.88 |               | 26.91 | SOFTVQ.yaml | SiT-XL/1D, SiT-B/1D |
+    | SOFT-VQ      | 15.88 | 29.11 | 26.91 | SOFTVQ.yaml | SiT-XL/1D, SiT-B/1D |
     | MAE-TOK      | 6.27 |               | 14.06 | MAETOK.yaml | SiT-XL/1D, SiT-B/1D |
-    | DE-TOK       | 11.97 |               | 17.51 | DETOK.yaml | SiT-XL/1D, SiT-B/1D |
+    | DE-TOK       | 11.97 | 20.27 | 17.51 | DETOK.yaml | SiT-XL/1D, SiT-B/1D |
     | DM-VAE       | 4.65 | 8.69 | 8.14 | DMVAE.yaml | SiT-XL/1D, SiT-B/1D |
-    | REPAE-VAE    | 12.95 |               | 36.70 | REPAEVAE.yaml | SiT-XL/2, SiT-B/2 |
+    | REPAE-VAE    | 12.95 | 26.06 | 36.70 | REPAEVAE.yaml | SiT-XL/2, SiT-B/2 |
     | RAE          | 4.25 | - | 7.68 | RAE.yaml | SiT-XL/1, SiT-B/1 |
 
 

@@ -9,6 +9,9 @@ logs/
 wandb/
 Record.md
 
+acc_single.yaml
+*.out
+*.sh
 # C extensions
 *.so
 

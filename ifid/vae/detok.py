@@ -688,8 +688,6 @@ class DETOKEXPORT(nn.Module):
     def encode(
         self,
         x,
-        return_reg_log=False,
-        unregularized=False,
     ):
         z = self.model.tokenize(x)
         return z

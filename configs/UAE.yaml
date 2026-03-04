@@ -1,0 +1,28 @@
+target: ifid.vae.uae.UAE
+params:
+  uae_config:
+    target: ifid.vae.unified_ae.UnifiedUAE
+    params:
+      encoder_cls: 'Dinov2withNorm'
+      encoder_config_path: 'facebook/dinov2-with-registers-base'
+      encoder_input_size: 224
+      encoder_params:
+        dinov2_path: 'facebook/dinov2-with-registers-base'
+        normalize: true
+      encoder_trainable: true
+      decoder_config_path: 'unified_ae/configs/decoder/ViTXL'
+      noise_tau: 0.8
+      reshape_to_2d: true
+      frequency_config:
+        freq_first_patch: 0.32
+        freq_num_bands: 2
+        freq_max_patch: 16.0
+        v_patch_nums: [0.32, 16.0]
+        quant_resi: 0.0
+        share_quant_resi: 4
+        codebook_drop: 0.0
+        spectral_transform_layers: 2
+        use_residual_split: true
+        residual_projector: "fft"
+        band_mask_fusion: "noise"
+  ckpt_path: weepiess2383/UAE/final.pt

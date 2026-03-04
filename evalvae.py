@@ -10,6 +10,9 @@ from tqdm import tqdm
 import torch.nn.functional as F
 import numpy as np
 from ifid.fid.fid import InceptionV3, calculate_frechet_distance
+from ifid.fid.psnr import get_psnr
+from ifid.fid.ssim import get_ssim_and_msssim
+from ifid.fid.lpips import get_lpips
 from ifid.dataset import ImageNetValDataset
 from torch.nn.functional import adaptive_avg_pool2d
 import torch.distributed as dist
@@ -158,8 +161,8 @@ def main(args):
         ]
     )
 
-    train_set = ImageNetValDataset(args.dataset, transform, args.small)
-    val_set = ImageNetValDataset(args.dataset_ref, transform)
+    train_set = ImageNetValDataset(args.dataset_ref, transform, args.small)
+    val_set = ImageNetValDataset(args.dataset, transform)
 
     train_loader = DataLoader(train_set, batch_size=25, shuffle=False, num_workers=8)
     val_loader = DataLoader(val_set, batch_size=25, shuffle=False, num_workers=8)
@@ -199,9 +202,15 @@ def main(args):
     # Validation loop
     # -------------------------
     pred_arr_in = []
+    pred_arr_rec = []
     pred_arr_znn = []
+    arr_psnr = []
+    arr_ssim = []
+    arr_msssim = []
+    arr_lpips = []
     ents = []
 
+    # val loader is not shared across process
     for img, y, name in tqdm(val_loader, disable=not accelerator.is_local_main_process):
         img = img.to(device)
         y = y.to(device)
@@ -366,35 +375,55 @@ def main(args):
                 for j, sample in enumerate(img_intp_np):
                     Image.fromarray(sample).save(f"{intp_dir}/{name[j]}")
 
+            pred_psnr = get_psnr(img_in, img_recon, zero_mean=True)
+            pred_ssim, pred_msssim = get_ssim_and_msssim(
+                img_in, img_recon, zero_mean=True
+            )
+            pred_lpips = get_lpips(
+                img_in, img_recon, zero_mean=True, network_type="alex"
+            )
+
+            arr_psnr.append(torch.mean(pred_psnr).item())
+            arr_ssim.append(torch.mean(pred_ssim).item())
+            arr_msssim.append(torch.mean(pred_msssim).item())
+            arr_lpips.append(torch.mean(pred_lpips).item())
+
             pred_in = inception(img_in)[0]
+            pred_rec = inception(img_recon)[0]
             pred_intp = inception(img_intp)[0]
             if pred_in.size(2) != 1:
                 pred_in = adaptive_avg_pool2d(pred_in, (1, 1))
+            if pred_rec.size(2) != 1:
+                pred_rec = adaptive_avg_pool2d(pred_rec, (1, 1))
             if pred_intp.size(2) != 1:
                 pred_intp = adaptive_avg_pool2d(pred_intp, (1, 1))
             pred_arr_in.append(pred_in.squeeze(-1).squeeze(-1).cpu().numpy())
+            pred_arr_rec.append(pred_rec.squeeze(-1).squeeze(-1).cpu().numpy())
             pred_arr_znn.append(pred_intp.squeeze(-1).squeeze(-1).cpu().numpy())
 
     pred_arr_in = np.concatenate(pred_arr_in)
+    pred_arr_rec = np.concatenate(pred_arr_rec)
     pred_arr_znn = np.concatenate(pred_arr_znn)
-
-    pred_arr_in = (
-        accelerator.gather(torch.from_numpy(pred_arr_in).to(device)).cpu().numpy()
-    )
-    pred_arr_znn = (
-        accelerator.gather(torch.from_numpy(pred_arr_znn).to(device)).cpu().numpy()
-    )
 
     if accelerator.is_main_process:
         mu_in = pred_arr_in.mean(0)
         sigma_in = np.cov(pred_arr_in, rowvar=False)
 
+        mu_rec = pred_arr_rec.mean(0)
+        sigma_rec = np.cov(pred_arr_rec, rowvar=False)
+
         mu_znn = pred_arr_znn.mean(0)
         sigma_znn = np.cov(pred_arr_znn, rowvar=False)
 
-        fid = calculate_frechet_distance(mu_in, sigma_in, mu_znn, sigma_znn)
+        ifid = calculate_frechet_distance(mu_in, sigma_in, mu_znn, sigma_znn)
+        rfid = calculate_frechet_distance(mu_in, sigma_in, mu_rec, sigma_rec)
 
-        print("ifid=", fid)
+        print("ifid={0:.4f}", ifid)
+        print("rfid={0:.4f}", rfid)
+        print("psnr={0:.4f}", np.mean(arr_psnr))
+        print("ssim={0:.4f}", np.mean(arr_ssim))
+        print("msssim={0:.4f}", np.mean(arr_msssim))
+        print("lpips={0:.4f}", np.mean(arr_lpips))
 
 
 if __name__ == "__main__":
