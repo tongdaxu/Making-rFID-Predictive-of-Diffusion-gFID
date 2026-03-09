@@ -372,3 +372,20 @@ class AEModel(VQModel):
         else:
             dec = self.decoder(quant, None, h, w)
         return dec
+
+
+class FlowModel(VQModel):
+    def __init__(self, config: ModelArgs,
+                tags=["arxiv:2502.03444", "image-generation", "1d-tokenizer", "128 tokens", "MAETok"], 
+                repo_url="https://github.com/Hhhhhhao/continuous_tokenizer", 
+                license="apache-2.0"):
+        super().__init__(config)
+        self.quantize = None 
+
+    def encode(self, x):
+        
+        h, _ = self.encoder(x)
+        return h, None, NOne
+
+    def decode(self, quant, x=None, h=None, w=None):
+        return self.encoder.inverse(quant)

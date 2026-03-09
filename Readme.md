@@ -1,6 +1,5 @@
 # Making Reconstruction FID Predictive of Diffusion Generation FID
-* Arxiv: TODO
-* Huggingface: TODO
+* Arxiv: https://arxiv.org/abs/2603.05630
 ## Brief
 * Reconstruction FID of VAE are often negatively correlated with generation FID of latent diffusion.
 * We slightly change the rFID computation into interpolated FID (iFID) to make it highly correlated to gFID.

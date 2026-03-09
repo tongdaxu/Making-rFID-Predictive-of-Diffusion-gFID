@@ -33,6 +33,19 @@ class MAETOK(nn.Module):
         return self.model.decode(z)
 
 
+class FLOWEXPORT(nn.Module):
+    def __init__(self, hf_repo="MAETok/maetok-b-128", **kwargs):
+        super().__init__()
+        self.model = AEModel.from_pretrained(hf_repo)
+
+    def encode(self, x):
+        z, _, _ = self.model.encode(x)
+        return z
+
+    def decode(self, z):
+        return self.model.decode(z)
+
+
 if __name__ == "__main__":
     from omegaconf import OmegaConf
     from ifid.vae.utils import instantiate_from_config
