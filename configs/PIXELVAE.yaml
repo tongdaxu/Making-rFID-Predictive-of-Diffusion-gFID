@@ -1,0 +1,3 @@
+target: ifid.vae.pixel_sit_vae.PixelSiTVAE
+params:
+  ckpt_file: /video_ssd/kongzishang/xutongda/git/REPA-E/exps/sit-xl-pixel-shift-400k/checkpoints/0400000.pt

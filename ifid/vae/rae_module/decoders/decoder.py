@@ -25,8 +25,11 @@ import torch
 from torch import nn
 
 # correct the above import to the following
-from .utils import ViTMAEConfig, ACT2FN, ModelOutput
-
+from transformers.activations import ACT2FN
+from transformers.utils import (
+    ModelOutput,
+)
+from transformers import ViTMAEConfig
 
 @dataclass
 class ViTMAEModelOutput(ModelOutput):

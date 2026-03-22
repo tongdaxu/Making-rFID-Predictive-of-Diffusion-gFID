@@ -6,7 +6,7 @@ import os
 
 
 class KLVAE(nn.Module):
-    def __init__(self, embed_dim, ch_mult, ckpt_path, **kwargs):
+    def __init__(self, embed_dim, ch_mult, ckpt_path, *args, **kwargs):
         super().__init__()
 
         if not os.path.exists(ckpt_path):
@@ -23,10 +23,10 @@ class KLVAE(nn.Module):
         )
         self.vae.load_state_dict(vae_ckpt, strict=False)
 
-    def encode(self, x):
+    def encode(self, x, *args, **kwargs):
         return self.vae.encode(x, sample=True)
 
-    def decode(self, z):
+    def decode(self, z, *args, **kwargs):
         return self.vae.decode(z).sample
 
 

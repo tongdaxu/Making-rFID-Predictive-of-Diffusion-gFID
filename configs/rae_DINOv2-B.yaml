@@ -1,12 +1,12 @@
 stage_1:
-  target: pit.modules.rae.rae.RAE
+  target: ifid.vae.rae_module.rae.RAE
   params:
     encoder_cls: 'Dinov2withNorm'
     encoder_config_path: 'facebook/dinov2-with-registers-base'
     encoder_input_size: 224
     encoder_params: {'dinov2_path': 'facebook/dinov2-with-registers-base', 'normalize': True}
-    decoder_config_path: '/video_ssd/kongzishang/xutongda/git/IFID/configs/rae_VITXL.json'
-    pretrained_decoder_path: '/share/xutongda/hfhome/hub/RAE-collections/decoders/dinov2/wReg_base/ViTXL_n08/model.pt'
+    decoder_config_path: './configs/rae_VITXL.json'
+    pretrained_decoder_path: 'nyu-visionx/RAE-collections/decoders/dinov2/wReg_base/ViTXL_n08/model.pt'
     noise_tau: 0.
     reshape_to_2d: True
-    normalization_stat_path: '/share/xutongda/hfhome/hub/RAE-collections/stats/dinov2/wReg_base/imagenet1k/stat.pt'
+    normalization_stat_path: 'nyu-visionx/RAE-collections/stats/dinov2/wReg_base/imagenet1k/stat.pt'

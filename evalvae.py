@@ -76,18 +76,23 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--vae-config", type=str, default="")
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--bs", type=int, default=25)
     parser.add_argument(
         "--intp", type=str, default="slerp", choices=["linear", "slerp", "mask"]
     )
     parser.add_argument("--alpha", type=float, default=0.5)
     parser.add_argument("--exp-name", type=str, default="ifid")
     parser.add_argument("--small", type=int, default=-1)
+    parser.add_argument("--small_val", type=int, default=-1)
     parser.add_argument("--sample-dir", type=str, default="./samples")
     parser.add_argument("--top", type=int, default=10)
     parser.add_argument("--dataset", type=str, default="")
     parser.add_argument("--dataset-ref", type=str, default="")
     parser.add_argument("-cpu", action="store_true")
     parser.add_argument("-save", action="store_true")
+    parser.add_argument("-pclass", action="store_true")
+    parser.add_argument("--save-every", type=int, default=1000)
+    parser.add_argument("--save-max", type=int, default=100)
 
     return parser.parse_args()
 
@@ -162,10 +167,10 @@ def main(args):
     )
 
     train_set = ImageNetValDataset(args.dataset_ref, transform, args.small)
-    val_set = ImageNetValDataset(args.dataset, transform)
+    val_set = ImageNetValDataset(args.dataset, transform, args.small_val)
 
-    train_loader = DataLoader(train_set, batch_size=25, shuffle=False, num_workers=8)
-    val_loader = DataLoader(val_set, batch_size=25, shuffle=False, num_workers=8)
+    train_loader = DataLoader(train_set, batch_size=args.bs, shuffle=False, num_workers=8)
+    val_loader = DataLoader(val_set, batch_size=args.bs, shuffle=False, num_workers=8)
 
     vae_config = OmegaConf.load(args.vae_config)
     vae = instantiate_from_config(vae_config).to(device)
@@ -182,13 +187,14 @@ def main(args):
     # Encode training latents (SHARDED)
     # -------------------------
     zs, ys = [], []
-    for img, y, name in tqdm(
-        train_loader, disable=not accelerator.is_local_main_process
-    ):
+    for img, y, name in tqdm(train_loader, disable=not accelerator.is_main_process):
         img = img.to(device)
         y = y.to(device)
         with torch.no_grad():
-            z = vae.encode(img)
+            try:
+                z = vae.encode(img, y)
+            except TypeError:
+                z = vae.encode(img)
         if args.cpu:
             z = z.cpu().to(torch.bfloat16)
         zs.append(z)
@@ -211,11 +217,16 @@ def main(args):
     ents = []
 
     # val loader is not shared across process
-    for img, y, name in tqdm(val_loader, disable=not accelerator.is_local_main_process):
+    global_seen = 0
+    saved_count = 0
+    for img, y, name in tqdm(val_loader, disable=not accelerator.is_main_process):
         img = img.to(device)
         y = y.to(device)
         with torch.no_grad():
-            z = vae.encode(img)
+            try:
+                z = vae.encode(img, y)
+            except TypeError:
+                z = vae.encode(img)
 
         if args.cpu:
             z = z.cpu().to(torch.bfloat16)
@@ -245,6 +256,10 @@ def main(args):
                 cost = -cos
 
         cost = cost.to(device)
+
+        if args.pclass:
+            cost_y = 1e9 * (torch.abs(ys[:,None] - y[None,:]))
+            cost = cost + cost_y
 
         z = z.to(device)
         z_flat = z_flat.to(device)
@@ -332,16 +347,25 @@ def main(args):
         # ---- decode + inception ----
         with torch.no_grad():
             img_in = img
-            img_recon = accelerator.unwrap_model(vae).decode(z)
-            img_intp = accelerator.unwrap_model(vae).decode(z_intp)
-            img_nn = accelerator.unwrap_model(vae).decode(znn)
+            # img_recon = accelerator.unwrap_model(vae).decode(z)
+            # img_intp = accelerator.unwrap_model(vae).decode(z_intp)
+            # img_nn = accelerator.unwrap_model(vae).decode(znn)
+            raw_vae = accelerator.unwrap_model(vae)
+            try:
+                img_recon = raw_vae.decode(z, y)
+                img_intp = raw_vae.decode(z_intp, y)
+                img_nn = raw_vae.decode(znn, y)
+            except TypeError:
+                img_recon = raw_vae.decode(z)
+                img_intp = raw_vae.decode(z_intp)
+                img_nn = raw_vae.decode(znn)
 
             img_in = (img_in + 1) / 2
             img_recon = (img_recon + 1) / 2
             img_intp = (img_intp + 1) / 2
             img_nn = (img_nn + 1) / 2
 
-            if args.save:
+            if args.save and accelerator.is_main_process:
                 img_nn_np = (
                     torch.clamp(255.0 * img_nn, 0, 255)
                     .permute(0, 2, 3, 1)
@@ -366,14 +390,28 @@ def main(args):
                     .to("cpu", dtype=torch.uint8)
                     .numpy()
                 )
-                for j, sample in enumerate(img_in_np):
-                    Image.fromarray(sample).save(f"{src_dir}/{name[j]}")
-                for j, sample in enumerate(img_recon_np):
-                    Image.fromarray(sample).save(f"{recon_dir}/{name[j]}")
-                for j, sample in enumerate(img_nn_np):
-                    Image.fromarray(sample).save(f"{nn_dir}/{name[j]}")
-                for j, sample in enumerate(img_intp_np):
-                    Image.fromarray(sample).save(f"{intp_dir}/{name[j]}")
+                # for j, sample in enumerate(img_in_np):
+                #     Image.fromarray(sample).save(f"{src_dir}/{name[j]}")
+                # for j, sample in enumerate(img_recon_np):
+                #     Image.fromarray(sample).save(f"{recon_dir}/{name[j]}")
+                # for j, sample in enumerate(img_nn_np):
+                #     Image.fromarray(sample).save(f"{nn_dir}/{name[j]}")
+                # for j, sample in enumerate(img_intp_np):
+                #     Image.fromarray(sample).save(f"{intp_dir}/{name[j]}")
+                for j in range(len(name)):
+                    should_save = (
+                        (args.save_max < 0 or saved_count < args.save_max)
+                        and (global_seen % args.save_every == 0)
+                    )
+
+                    if should_save:
+                        Image.fromarray(img_in_np[j]).save(f"{src_dir}/{name[j]}")
+                        Image.fromarray(img_recon_np[j]).save(f"{recon_dir}/{name[j]}")
+                        Image.fromarray(img_nn_np[j]).save(f"{nn_dir}/{name[j]}")
+                        Image.fromarray(img_intp_np[j]).save(f"{intp_dir}/{name[j]}")
+                        saved_count += 1
+
+                    global_seen += 1
 
             pred_psnr = get_psnr(img_in, img_recon, zero_mean=True)
             pred_ssim, pred_msssim = get_ssim_and_msssim(

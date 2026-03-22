@@ -4,7 +4,7 @@ from ifid.vae.rae_module.rae import instantiate_rae_from_config, parse_rae_confi
 
 
 class RAE(nn.Module):
-    def __init__(self, rae_config):
+    def __init__(self, rae_config, *args, **kwargs):
         super().__init__()
         rae_config, *_ = parse_rae_configs(rae_config)
         self.rae = instantiate_rae_from_config(rae_config)
@@ -12,13 +12,14 @@ class RAE(nn.Module):
     def encode(
         self,
         x,
+        *args, **kwargs
     ):
         # x -> [0, 1]
         x = (x + 1.0) / 2.0
         z = self.rae.encode(x)
         return z
 
-    def decode(self, z):
+    def decode(self, z, *args, **kwargs):
         xhat = self.rae.decode(z)
         xhat = xhat * 2.0 - 1.0
         return xhat

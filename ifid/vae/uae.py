@@ -7,7 +7,7 @@ from huggingface_hub import hf_hub_download
 
 
 class UAE(nn.Module):
-    def __init__(self, uae_config, ckpt_path):
+    def __init__(self, uae_config, ckpt_path, *args, **kwargs):
         super().__init__()
         self.uae = instantiate_from_config(uae_config)
         if not os.path.exists(ckpt_path):
@@ -22,6 +22,7 @@ class UAE(nn.Module):
     def encode(
         self,
         x,
+        *args, **kwargs
     ):
 
         freq_ratio_tensor = torch.full(
@@ -40,7 +41,7 @@ class UAE(nn.Module):
         )
         return z
 
-    def decode(self, z):
+    def decode(self, z, *args, **kwargs):
         xhat = self.uae.decode(z)
         xhat = xhat.clamp(0.0, 1.0)
         xhat = xhat * 2.0 - 1.0

@@ -1,0 +1,3 @@
+target: ifid.vae.continuous_tokenizer_vae.ContinuousTokenizerVAE
+params:
+  ckpt_file: /video_ssd/kongzishang/xutongda/git/continuous_tokenizer/experiments/tokenizer/exp000-flow-b/checkpoints/0060000.pt

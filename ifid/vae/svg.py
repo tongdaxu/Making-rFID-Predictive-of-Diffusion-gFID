@@ -107,6 +107,7 @@ class SVGEXPORT(nn.Module):
         embed_dim,
         extra_vit_config=None,
         ckpt_path=None,
+        *args, **kwargs,
     ):
         super().__init__()
         self.decoder = Decoder(**ddconfig)
@@ -140,7 +141,7 @@ class SVGEXPORT(nn.Module):
         self.load_state_dict(sd, strict=False)
         print(f"Restored from {path}")
 
-    def encode(self, x):
+    def encode(self, x, *args, **kwargs):
         x = (x + 1) / 2
 
         mean = torch.tensor([0.485, 0.456, 0.406], device=x.device).view(1, 3, 1, 1)
@@ -163,7 +164,7 @@ class SVGEXPORT(nn.Module):
         ).contiguous()
         return h
 
-    def decode(self, z):
+    def decode(self, z, *args, **kwargs):
         return self.decoder(z)
 
 

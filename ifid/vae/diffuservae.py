@@ -3,7 +3,7 @@ import torch.nn as nn
 
 
 class DIFFUSERVAE(nn.Module):
-    def __init__(self, hf_repo):
+    def __init__(self, hf_repo, *args, **kwargs):
         super().__init__()
         from diffusers import AutoencoderKL
 
@@ -12,18 +12,19 @@ class DIFFUSERVAE(nn.Module):
     def encode(
         self,
         x,
+        *args, **kwargs
     ):
         qzx = self.model.encode(x, return_dict=False)[0]
         z = qzx.sample()
         return z
 
-    def decode(self, z):
+    def decode(self, z, *args, **kwargs):
         xhat = self.model.decode(z, return_dict=False)[0]
         return xhat
 
 
 class QWVAE(nn.Module):
-    def __init__(self, hf_repo="Qwen/Qwen-Image", **kwargs):
+    def __init__(self, hf_repo="Qwen/Qwen-Image", *args, **kwargs):
         super().__init__()
         from diffusers import AutoencoderKLQwenImage
 
@@ -32,12 +33,13 @@ class QWVAE(nn.Module):
     def encode(
         self,
         x,
+        *args, **kwargs,
     ):
         qzx = self.model.encode(x[:, :, None], return_dict=False)
         z = qzx[0].sample()[:, :, 0]
         return z
 
-    def decode(self, z):
+    def decode(self, z, *args, **kwargs):
         xhat = self.model.decode(z[:, :, None], return_dict=False)[0][:, :, 0]
         return xhat
 

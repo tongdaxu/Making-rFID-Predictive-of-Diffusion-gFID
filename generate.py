@@ -28,12 +28,14 @@ from tqdm import tqdm
 import shutil
 
 from ifid.sit.sit import SiT_models
-from ifid.sit.samplers import euler_maruyama_sampler
+from ifid.sit.samplers import euler_sampler, euler_maruyama_sampler, edict_sampler, edict_inverter
 from train import denormalize_latents
 from datetime import timedelta
 from omegaconf import OmegaConf
 from ifid.vae.utils import instantiate_from_config
-
+from ifid.fid.psnr import get_psnr
+from eval_intp import save_tensor_image
+import torch.nn.functional as F
 
 def create_npz_from_sample_folder(sample_dir, num=50_000):
     """
@@ -73,6 +75,10 @@ def main(args):
     torch.cuda.set_device(device)
     print(f"Starting rank={rank}, seed={seed}, world_size={dist.get_world_size()}.")
 
+    # Figure out how many samples we need to generate on each GPU and how many iterations we need to run:
+    n = args.pproc_batch_size
+    global_batch_size = n * dist.get_world_size()
+
     if args.exp_path is None or args.train_steps is None:
         if rank == 0:
             print(
@@ -85,6 +91,7 @@ def main(args):
         config = dictdot(json.load(f))
 
     # Create model:
+
     vae_config = OmegaConf.load(config.vae_config)
     vae = instantiate_from_config(vae_config).to(device)
     vae.eval()
@@ -129,7 +136,7 @@ def main(args):
         os.path.join(args.exp_path, "checkpoints", train_step_str + ".pt"),
         map_location=f"cuda:{device}",
     )
-    model.load_state_dict(state_dict["ema"])
+    model.load_state_dict(state_dict["ema"], strict=False)
     model.eval()  # Important! To disable label dropout during sampling
 
     if vae_1d:
@@ -162,9 +169,6 @@ def main(args):
     sample_folder_dir = f"{args.sample_dir}/{exp_name}_{train_step_str}_cfg{args.cfg_scale}-{args.guidance_low}-{args.guidance_high}"
     os.makedirs(sample_folder_dir, exist_ok=True)
 
-    # Figure out how many samples we need to generate on each GPU and how many iterations we need to run:
-    n = args.pproc_batch_size
-    global_batch_size = n * dist.get_world_size()
     # To make things evenly-divisible, we'll sample a bit more than we need and then discard the extra samples:
     total_samples = int(
         math.ceil(args.num_fid_samples / global_batch_size) * global_batch_size
@@ -173,9 +177,7 @@ def main(args):
         print(sample_folder_dir)
         print(f"Total number of images that will be sampled: {total_samples}")
         print(f"SiT Parameters: {sum(p.numel() for p in model.parameters()):,}")
-        print(
-            f"projector Parameters: {sum(p.numel() for p in model.projectors.parameters()):,}"
-        )
+
     assert total_samples % dist.get_world_size() == 0, (
         "total_samples must be divisible by world_size"
     )
@@ -216,7 +218,38 @@ def main(args):
 
         with torch.no_grad():
             if args.mode == "sde":
-                samples = euler_maruyama_sampler(**sampling_kwargs).to(torch.float32)
+                samples, samples_alt = euler_maruyama_sampler(**sampling_kwargs).to(torch.float32), None
+            elif args.mode == "ode":
+                samples, samples_alt = euler_sampler(**sampling_kwargs).to(torch.float32), None
+            elif args.mode == "edict":
+                # convert pixel sit into a VAE
+                # read image [-1, 1]
+                # image 3x256x256 -> PIXELVAE.encode() -> z
+                # z -> normalize -> znrom
+                # znorm -> edict_inverter[0] -> latent
+
+                # latent -> edict_sampler[0] -> znorm
+                # znorm -> denormalize -> z
+                # z -> PIXELVAE.decode() -> image 3x256x256
+
+                samples, samples_2, samples_hist= edict_sampler(**sampling_kwargs)
+                samples, samples_2 = samples.to(torch.float32), samples_2.to(torch.float32)
+                sampling_kwargs["latents"] = samples
+                # sampling_kwargs["latents_2"] = samples_2
+                inv_samples, inv_samples_2, inverse_hist = edict_inverter(**sampling_kwargs)
+                mse_z = torch.mean((inv_samples - z)**2)
+                print(mse_z, mse_z / torch.mean(z**2))
+
+                samples_hist = samples_hist[::-1]
+                for i in range(len(samples_hist)):
+                    print(i, torch.mean((samples_hist[i] - inverse_hist[i])**2).item())
+
+                save_tensor_image(F.pixel_shuffle(torch.clamp(inv_samples, -1, 1), 16), "z1.png")
+                save_tensor_image(F.pixel_shuffle(torch.clamp(inv_samples_2, -1, 1), 16), "z2.png")
+
+                sampling_kwargs["latents"] = inv_samples.to(torch.float32)
+                samples_alt, samples_alt_2, _ = edict_sampler(**sampling_kwargs)
+                samples_alt, samples_alt_2 = samples_alt.to(torch.float32), samples_alt_2.to(torch.float32)
             else:
                 raise NotImplementedError()
 
@@ -224,6 +257,15 @@ def main(args):
                 denormalize_latents(samples, latents_scale, latents_bias)
             )
             samples = (samples + 1) / 2.0
+
+            if samples_alt is not None:
+                samples_alt = vae.decode(
+                    denormalize_latents(samples_alt, latents_scale, latents_bias)
+                )
+                samples_alt = (samples_alt + 1) / 2.0
+                pred_psnr = get_psnr(samples, samples_alt, zero_mean=True)
+                print("edict psnr: {0:.2f}".format(torch.mean(pred_psnr).item()))
+
             samples = (
                 torch.clamp(255.0 * samples, 0, 255)
                 .permute(0, 2, 3, 1)
@@ -235,6 +277,8 @@ def main(args):
             for i, sample in enumerate(samples):
                 index = i * dist.get_world_size() + rank + total
                 Image.fromarray(sample).save(f"{sample_folder_dir}/{index:06d}.png")
+
+                assert(0)
         total += global_batch_size
 
     # Make sure all processes have finished saving their samples before attempting to convert to .npz

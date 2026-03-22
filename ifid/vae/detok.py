@@ -663,7 +663,7 @@ DeTok_models = {
 
 
 class DETOKEXPORT(nn.Module):
-    def __init__(self, ckpt_path):
+    def __init__(self, ckpt_path, *args, **kwargs):
         super().__init__()
 
         if not os.path.exists(ckpt_path):
@@ -688,11 +688,12 @@ class DETOKEXPORT(nn.Module):
     def encode(
         self,
         x,
+        *args, **kwargs
     ):
         z = self.model.tokenize(x)
         return z
 
-    def decode(self, z):
+    def decode(self, z, *args, **kwargs):
         xhat = self.model.detokenize(z)
         return xhat
 

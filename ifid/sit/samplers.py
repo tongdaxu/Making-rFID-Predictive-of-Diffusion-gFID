@@ -231,3 +231,231 @@ def euler_maruyama_sampler(
 
     mean_x = x_cur + dt * d_cur
     return mean_x
+
+
+'''
+def edict_sampler(
+    model,
+    latents,
+    y,
+    num_steps=20,
+    *args,
+    **kwargs,
+):
+
+    _dtype = latents.dtype
+    t_steps = torch.linspace(1, 0, num_steps + 1, dtype=torch.float64)
+    t_steps = model.shift_time(t_steps)
+    x_next = latents.to(torch.float64)
+    device = x_next.device
+    y_next = x_next.clone()
+
+    with torch.no_grad():
+        for i, (t_cur, t_next) in enumerate(zip(t_steps[:-1], t_steps[1:])):
+            x_cur, y_cur = x_next, y_next
+
+            kwargs = dict(y=y)
+            time_input = (
+                torch.ones(latents.size(0)).to(device=device, dtype=torch.float64)
+                * t_cur
+            )
+            d_x = model.inference(
+                y_cur.to(dtype=_dtype), time_input.to(dtype=_dtype), **kwargs
+            ).to(torch.float64)
+            x_next = x_cur + (t_next - t_cur) * d_x
+
+            d_y = model.inference(
+                x_next.to(dtype=_dtype), time_input.to(dtype=_dtype), **kwargs
+            ).to(torch.float64)
+            y_next = y_cur + (t_next - t_cur) * d_y
+
+    return x_next, y_next
+
+def edict_inverter(
+    model,
+    latents,
+    y,
+    num_steps=20,
+    *args,
+    **kwargs,
+):
+
+    _dtype = latents.dtype
+
+    # reverse time direction
+    t_steps = torch.linspace(0, 1, num_steps + 1, dtype=torch.float64)
+    t_steps = model.shift_time(t_steps)
+
+    x_next = latents.to(torch.float64)
+    y_next = x_next.clone()
+
+    device = x_next.device
+
+    with torch.no_grad():
+        for i, (t_cur, t_next) in enumerate(zip(t_steps[:-1], t_steps[1:])):
+
+            x_cur, y_cur = x_next, y_next
+
+            kwargs = dict(y=y)
+
+            time_input = (
+                torch.ones(latents.size(0), device=device, dtype=torch.float64)
+                * t_next
+            )
+
+            # invert y first (depends on x_next)
+            d_y = model.inference(
+                x_cur.to(dtype=_dtype), time_input.to(dtype=_dtype), **kwargs
+            ).to(torch.float64)
+
+            y_next = y_cur - (t_next - t_cur) * d_y
+
+            # invert x (depends on new y_next)
+            d_x = model.inference(
+                y_next.to(dtype=_dtype), time_input.to(dtype=_dtype), **kwargs
+            ).to(torch.float64)
+
+            x_next = x_cur - (t_next - t_cur) * d_x
+
+    return x_next, y_next
+'''
+
+def edict_step(
+    model,
+    x,
+    y,
+    t_cur,
+    t_next,
+    cond,
+    dtype,
+    p=0.93,
+    inverse=False,
+    swap=False,
+):
+
+    if inverse == False:
+        name = "fw"
+    else:
+        name = "bw"
+
+    # print("[{0}] {1:.4f} to {2:.4f}".format(name, t_cur, t_next))
+    # print("[{0}] x cur: {1} y cur {2}".format(name, x.reshape(-1)[:4], y.reshape(-1)[:4]))
+
+    dt = -torch.abs(t_next - t_cur)
+    # dt = t_next - t_cur
+    device = x.device
+
+    # choose which time the model sees
+    t_model = t_next if inverse else t_cur
+
+    time_input = torch.ones(x.size(0), device=device, dtype=torch.float64) * t_model
+
+    def eps(z):
+        model_out = model.inference(z.to(dtype=dtype), time_input.to(dtype=dtype), y=cond).to(torch.float64)
+        return model_out
+
+    # choose update order
+    if not swap:
+        d_x = eps(y)
+        x_inter = x - dt * d_x if inverse else x + dt * d_x
+
+        d_y = eps(x_inter)
+        y_inter = y - dt * d_y if inverse else y + dt * d_y
+
+    else:
+
+        d_y = eps(x)
+        y_inter = y - dt * d_y if inverse else y + dt * d_y
+
+        d_x = eps(y_inter)
+        x_inter = x - dt * d_x if inverse else x + dt * d_x
+
+    # print("[{0}] dx out: {1} dy out: {2}".format(name, d_x.reshape(-1)[:4], d_y.reshape(-1)[:4]))
+
+    # mixing (skip if p=None)
+    if p is None:
+        return x_inter, y_inter
+
+    x_new = p * x_inter + (1 - p) * y_inter
+    y_new = p * y_inter + (1 - p) * x_new
+
+    # print("[{0}] x nex: {1} y nex: {2}".format(name, x_new.reshape(-1)[:4], y_new.reshape(-1)[:4]))
+    # print("\n")
+    return x_new, y_new
+
+
+def edict_sampler(
+    model,
+    latents,
+    y,
+    num_steps=20,
+    p=0.9,
+    *args,
+    **kwargs,
+):
+    dtype = latents.dtype
+
+    t_steps = torch.linspace(1, 0, num_steps + 1, dtype=torch.float64)
+    t_steps = model.shift_time(t_steps)
+
+    x_ = latents.to(torch.float64)
+    y_ = x_.clone()
+    xs = [x_]
+
+    for i, (t_cur, t_next) in enumerate(zip(t_steps[:-1], t_steps[1:])):
+        x_, y_ = edict_step(
+            model,
+            x_,
+            y_,
+            t_cur,
+            t_next,
+            y,
+            dtype,
+            p=p,
+            inverse=False,
+            swap=False,
+        )
+        xs.append(x_)
+
+    return x_, y_, xs
+
+def edict_inverter(
+    model,
+    latents,
+    y,
+    num_steps=20,
+    p=0.9,
+    latents_2=None,
+    *args,
+    **kwargs,
+):
+    dtype = latents.dtype
+
+    t_steps = torch.linspace(0, 1, num_steps + 1, dtype=torch.float64)
+    t_steps = model.shift_time(t_steps)
+
+    x_ = latents.to(torch.float64)
+    if latents_2 is None:
+        y_ = x_.clone()
+    else:
+        y_ = latents_2
+    xs = [x_]
+
+    for i, (t_cur, t_next) in enumerate(zip(t_steps[:-1], t_steps[1:])):
+
+        x_, y_ = edict_step(
+            model,
+            x_,
+            y_,
+            t_cur,
+            t_next,
+            y,
+            dtype,
+            p=p,
+            inverse=True,
+            swap=True,
+        )
+
+        xs.append(x_)
+
+    return x_, y_, xs

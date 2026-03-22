@@ -8,9 +8,9 @@ from math import sqrt
 from typing import Protocol
 import importlib
 from typing import Union, Tuple
-from omegaconf import OmegaConf
-from omegaconf import DictConfig
-
+from omegaconf import OmegaConf, DictConfig
+import os 
+from huggingface_hub import hf_hub_download
 
 class Stage1Protocal(Protocol):
     # must have patch size attribute
@@ -67,6 +67,12 @@ class RAE(nn.Module):
         self.decoder = GeneralDecoder(decoder_config, num_patches=self.base_patches)
         # load pretrained decoder weights
         if pretrained_decoder_path is not None:
+            if not os.path.exists(pretrained_decoder_path):
+                repo_id, fname = (lambda p: ("/".join(p[:2]), p[2] if len(p) > 2 else ""))(pretrained_decoder_path.split("/", 2))
+                pretrained_decoder_path = hf_hub_download(
+                    repo_id=repo_id,
+                    filename=fname,
+                )
             print(f"Loading pretrained decoder from {pretrained_decoder_path}")
             state_dict = torch.load(pretrained_decoder_path, map_location="cpu")
             keys = self.decoder.load_state_dict(state_dict, strict=False)
@@ -77,6 +83,12 @@ class RAE(nn.Module):
         self.noise_tau = noise_tau
         self.reshape_to_2d = reshape_to_2d
         if normalization_stat_path is not None:
+            if not os.path.exists(normalization_stat_path):
+                repo_id, fname = (lambda p: ("/".join(p[:2]), p[2] if len(p) > 2 else ""))(normalization_stat_path.split("/", 2))
+                normalization_stat_path = hf_hub_download(
+                    repo_id=repo_id,
+                    filename=fname,
+                )
             stats = torch.load(normalization_stat_path, map_location="cpu")
             self.latent_mean = stats.get("mean", None)
             self.latent_var = stats.get("var", None)

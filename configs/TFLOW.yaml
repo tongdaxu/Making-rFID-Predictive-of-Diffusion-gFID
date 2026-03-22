@@ -1,0 +1,12 @@
+target: ifid.vae.transformer_flow_vae.TransformerFlowVAE
+params:
+  ckpt_file: /video_ssd/kongzishang/xutongda/git/ml-tarflow/runs/imagenet256-cond/imagenet_model_8_768_8_8_0.05.pth
+  img_size: 256
+  channel_size: 3
+  patch_size: 8
+  channels: 768
+  blocks: 8
+  layers_per_block: 8
+  nvp: true
+  num_classes: 1000
+  decode_guidance: 0.0
