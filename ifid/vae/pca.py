@@ -19,7 +19,6 @@ import torch_dct as dct
 import torch
 import matplotlib.pyplot as plt
 from skimage import data
-import pytorch_wavelet as wavelet
 from haar_pytorch import HaarForward, HaarInverse
 
 def read_image_tensor(path):
@@ -57,13 +56,19 @@ class DCTVAE(nn.Module):
         super().__init__()
 
     def encode(self, x, *args, **kwargs):
-        y = F.pixel_unshuffle(x, 16)
-        z = dct.dct_2d(y)
+        b, c, h, w = x.shape
+        y = F.unfold(x, kernel_size=16, stride=16).reshape(b, c, 256, (h*w)//256).permute(0, 1, 3, 2)
+        z = dct.dct_2d(y.reshape(b, c, (h*w)//256, 16, 16)).reshape(b, c, (h*w)//256, 256)
+        z = z.permute(0,1,3,2).reshape(b, 768, h//16, w//16)
         return z
 
     def decode(self, z, *args, **kwargs):
-        y = dct.idct_2d(z)
-        x = F.pixel_shuffle(y, 16)
+        b = z.shape[0]
+        h, w = 256, 256
+        z = z.reshape(b, 3, 256, (h*w)//256).permute(0,1,3,2)
+        y = dct.idct_2d(z.reshape(b, 3, (h*w)//256, 16, 16)).reshape(b, 3, (h*w)//256, 256)
+        y = y.permute(0,1,3,2).reshape(b, 768, (h*w)//256)
+        x = F.fold(y, output_size=256, kernel_size=16, stride=16)
         return x
 
 
@@ -121,7 +126,7 @@ if __name__ == "__main__":
     from omegaconf import OmegaConf
     from ifid.vae.utils import instantiate_from_config
 
-    configs = OmegaConf.load("../../configs/HAAR.yaml")
+    configs = OmegaConf.load("../../configs/DCT.yaml")
     sdvae = instantiate_from_config(configs)
     x = torch.randn([1, 3, 256, 256])
     z = sdvae.encode(x)
