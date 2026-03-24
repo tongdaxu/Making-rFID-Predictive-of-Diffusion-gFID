@@ -132,9 +132,12 @@ def read_image(input_: str) -> np.ndarray:
     Read and convert to (H,W,3) np.uint8 from a local path.
     Return None if something fails.
     """
-    with Image.open(input_) as im:
-        return np.array(im.convert("RGB"))
-
+    try:
+        with Image.open(input_) as im:
+            return np.array(im.convert("RGB"))
+    except:
+        print("bad image {}".format(input_))
+        return None
 
 def _process_single_image(args):
     """

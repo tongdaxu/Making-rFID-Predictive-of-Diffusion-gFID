@@ -301,8 +301,8 @@ class SiT(nn.Module):
 
         self.tshift = tshift
         self.bn.reset_running_stats()
-
         self.initialize_weights()
+        self.encoder_depth = 8
 
     def shift_time(self, t):
         shifted_t = self.tshift * t / (1 + (self.tshift - 1) * t)
@@ -485,11 +485,13 @@ class SiT(nn.Module):
         t_embed = self.t_embedder(time_input.flatten())  # (N, D)
         y = self.y_embedder(y, self.training)  # (N, D)
         c = t_embed + y  # (N, D)
-
+        zs = []
         for i, block in enumerate(self.blocks):
             # checkpoint
-            x = torch.utils.checkpoint.checkpoint(block, x, c, use_reentrant=False)
+            # x = torch.utils.checkpoint.checkpoint(block, x, c, use_reentrant=False)
             x = block(x, c)  # (N, T, D)
+            if (i + 1) == self.encoder_depth:
+                zs.append(x)
 
         x = self.final_layer(x, c)  # (N, T, patch_size ** 2 * out_channels)
         if not self.vae_1d:
@@ -503,6 +505,7 @@ class SiT(nn.Module):
             "denoising_loss": denoising_loss,
             "time_input": time_input,
             "noises": noises,
+            "zs": zs,
         }
 
         return ret_dict

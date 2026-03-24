@@ -17,18 +17,13 @@ from torch.utils.data import DataLoader
 from torchvision.utils import make_grid
 from tqdm.auto import tqdm
 import wandb
-
+import torch.nn.functional as F
 from ifid.dataset import CustomINH5Dataset
 from ifid.sit.sit import SiT_models
 from ifid.sit.samplers import euler_sampler
 from ifid.vae.utils import instantiate_from_config
-from PIL import Image 
-from accelerate.utils import DistributedDataParallelKwargs
 
-try:
-    from turihub import Hub
-except:
-    Hub = None
+from accelerate.utils import DistributedDataParallelKwargs
 
 logger = get_logger(__name__)
 
@@ -183,6 +178,7 @@ def main(args):
     vae_config = OmegaConf.load(args.vae_config)
     vae = instantiate_from_config(vae_config).to(device)
     vae.eval()
+
     for name, param in vae.named_parameters():
         param.requires_grad_(False)
 
@@ -215,8 +211,9 @@ def main(args):
         **block_kwargs,
     )
 
-    # make a copy of the model for EMA
     model = model.to(device)
+
+    # make a copy of the model for EMA
     ema = copy.deepcopy(model).to(
         device
     )  # Create an EMA of the model for use after training
@@ -225,9 +222,48 @@ def main(args):
     # Apply SyncBN if more than 1 GPU is used
     if accelerator.use_distributed:
         model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
-
+    
     if accelerator.is_main_process:
         logger.info(f"SiT Parameters: {sum(p.numel() for p in model.parameters()):,}")
+
+    # Create teacher model:
+    vae_teacher_config = OmegaConf.load(args.vae_teacher_config)
+    vae_teacher = instantiate_from_config(vae_teacher_config).to(device)
+    vae_teacher.eval()
+
+    fake_z_teacher = vae_teacher.encode(fake_in)[0]
+
+    if len(fake_z_teacher.shape) == 3:
+        # 2d latent
+        latent_size_teacher = fake_z_teacher.shape[-1]
+        in_channels_teacher = fake_z_teacher.shape[0]
+    elif len(fake_z.shape) == 2:
+        # 1d latent
+        latent_size_teacher = fake_z_teacher.shape[0]
+        in_channels_teacher = fake_z_teacher.shape[-1]
+    else:
+        assert 0
+
+    block_kwargs = {"fused_attn": args.fused_attn, "qk_norm": args.qk_norm}
+    model_teacher = SiT_models[args.model](
+        input_size=latent_size_teacher,
+        in_channels=in_channels_teacher,
+        num_classes=args.num_classes,
+        class_dropout_prob=args.cfg_prob,
+        bn_momentum=args.bn_momentum,
+        tshift=tshift,
+        **block_kwargs,
+    )
+
+    # make a copy of the model for EMA
+    model_teacher = model_teacher.to(device)
+    model_teacher.eval()
+
+    for name, param in vae_teacher.named_parameters():
+        param.requires_grad_(False)
+
+    for name, param in model_teacher.named_parameters():
+        param.requires_grad_(False)
 
     # Setup optimizer (we used default Adam betas=(0.9, 0.999) and a constant learning rate of 1e-4 in our paper):
     if args.allow_tf32:
@@ -288,17 +324,11 @@ def main(args):
 
     if accelerator.is_main_process:
         tracker_config = vars(copy.deepcopy(args))
-        if Hub is None:
-            accelerator.init_trackers(
-                project_name="diffusion vae arena",
-                config=tracker_config,
-                init_kwargs={"wandb": {"name": f"{args.exp_name}"}},
-            )
-        else:
-            hub=Hub()
-            hub_project = hub.project('playground')
-            hub_exp = hub_project.experiments_api.experiment('tongda_xu_dev')
-            hub_run = hub_exp.start_run(name=args.exp_name, enable_async=False)
+        accelerator.init_trackers(
+            project_name="diffusion vae arena",
+            config=tracker_config,
+            init_kwargs={"wandb": {"name": f"{args.exp_name}"}},
+        )
 
     progress_bar = tqdm(
         range(0, args.max_train_steps),
@@ -325,6 +355,7 @@ def main(args):
                 vae.eval()
                 with torch.no_grad():
                     z = vae.encode(processed_image)
+                    z_teacher = vae_teacher.encode(processed_image)
                 # 2). Backward pass: VAE, compute the VAE loss, backpropagate, and update the VAE; Then, compute the riminator loss and update the discriminator
                 #    loss_kwargs used for SiT forward function, create here and can be reused for both VAE and SiT
                 loss_kwargs = dict(
@@ -347,8 +378,23 @@ def main(args):
                     noises=noises,
                 )
 
+                with torch.no_grad():
+                    sit_outputs_teacher = model_teacher(
+                        x=z_teacher,
+                        y=labels,
+                        loss_kwargs=loss_kwargs,
+                        time_input=sit_outputs["time_input"],
+                        noises=sit_outputs["noises"],
+                    )
+                zs = sit_outputs["zs"].reshape(z_teacher.shape[0], -1)
+                zs_teacher = sit_outputs_teacher["zs"].reshape(z_teacher.shape[0], -1)
+
+                zs = F.normalize(zs, dim=-1)
+                zs_teacher = F.normalize(zs_teacher, dim=-1)
+                align_loss = torch.mean(-torch.sum(zs * zs_teacher, dim=-1))
                 sit_loss = sit_outputs["denoising_loss"].mean()
-                accelerator.backward(sit_loss)
+                loss = sit_loss + align_loss * args.align_loss_lambda
+                accelerator.backward(loss)
 
                 if accelerator.sync_gradients:
                     grad_norm_sit = accelerator.clip_grad_norm_(
@@ -374,6 +420,7 @@ def main(args):
                 # Prepare the logs based on the current step
                 logs = {
                     "sit_loss": accelerator.gather(sit_loss).mean().detach().item(),
+                    "align_loss": accelerator.gather(align_loss).mean().detach().item(),
                     "denoising_loss": accelerator.gather(sit_outputs["denoising_loss"])
                     .mean()
                     .detach()
@@ -386,10 +433,7 @@ def main(args):
                 }
 
                 progress_bar.set_postfix(**logs)
-                if Hub is None:
-                    accelerator.log(logs, step=global_step)
-                else:
-                    hub_run.log_metrics(logs, step=global_step)
+                accelerator.log(logs, step=global_step)
 
             if global_step % args.checkpointing_steps == 0 and global_step > 0:
                 if accelerator.is_main_process:
@@ -450,15 +494,7 @@ def main(args):
                     )
                     samples = (samples + 1) / 2.0
                 out_samples = accelerator.gather(samples.to(torch.float32))
-
-                if Hub is None:
-                    accelerator.log({"samples": wandb.Image(array2grid(out_samples))})
-                else:
-                    img = Image.fromarray(array2grid(out_samples))
-                    img_path = os.path.join(args.logging_dir, f"sample_{global_step:07d}.png")
-                    img.save(img_path)
-                    hub_run.log_artifact('samples', img_path, step=global_step)
-
+                accelerator.log({"samples": wandb.Image(array2grid(out_samples))})
                 logging.info("Generating EMA samples done.")
 
             if global_step >= args.max_train_steps:
@@ -586,6 +622,8 @@ def parse_args(input_args=None):
 
     # vae params
     parser.add_argument("--vae-config", type=str, default="")
+    parser.add_argument("--vae-teacher-config", type=str, default="")
+    parser.add_argument("--align-loss-lambda", type=float, default=1.0)
 
     if input_args is not None:
         args = parser.parse_args(input_args)

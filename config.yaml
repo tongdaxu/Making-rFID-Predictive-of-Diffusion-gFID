@@ -1,0 +1,14 @@
+# project_id: ispalgo_us
+name: rae training
+description: rae training
+tags: ['rae training']
+command: 'bash train_rae.sh'
+resources:
+  docker_image: docker.apple.com/tongda_xu/test:v4
+  task_type: 1gpu
+  num_nodes: 1
+  disk_gb: 512
+  # cluster: ["GCP_ALL"]
+# cluster_options:
+#   gcp:
+#     instance_type: a2-ultragpu-8g
