@@ -7,7 +7,7 @@ import math
 from pathlib import Path
 from collections import OrderedDict
 from omegaconf import OmegaConf
-
+import datetime
 from accelerate import Accelerator, InitProcessGroupKwargs
 from datetime import timedelta
 from accelerate.logging import get_logger
@@ -298,7 +298,7 @@ def main(args):
             hub=Hub()
             hub_project = hub.project('playground')
             hub_exp = hub_project.experiments_api.experiment('tongda_xu_dev')
-            hub_run = hub_exp.start_run(name=args.exp_name, enable_async=False)
+            hub_run = hub_exp.start_run(name=args.exp_name + "-" + datetime.now().strftime("%Y-%m-%d_%H-%M-%S"), enable_async=False)
 
     progress_bar = tqdm(
         range(0, args.max_train_steps),
