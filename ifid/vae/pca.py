@@ -6,7 +6,6 @@ from contextlib import nullcontext
 from timm.models import create_model
 
 from dataclasses import dataclass
-from PIL import Image
 import numpy as np
 
 from einops import rearrange
@@ -17,40 +16,8 @@ import torchvision
 import torch
 import torch_dct as dct
 import torch
-import matplotlib.pyplot as plt
-from skimage import data
-import pytorch_wavelet as wavelet
 from haar_pytorch import HaarForward, HaarInverse
 
-def read_image_tensor(path):
-    """
-    Read image and return tensor of shape (1,3,256,256) in range [-1,1]
-    """
-    img = Image.open(path).convert("RGB").resize((256, 256))
-    x = torch.from_numpy(np.array(img)).float() / 255.0  # [0,1]
-    x = x.permute(2, 0, 1)                               # (3,H,W)
-    x = x * 2 - 1                                         # [-1,1]
-    x = x.unsqueeze(0)                                    # (1,3,256,256)
-    return x
-
-
-def save_tensor_image(x, path):
-    """
-    Save tensor of shape (1,3,256,256) with range [-1,1] to PNG
-    """
-    x = x.detach().cpu()
-
-    if x.dim() == 4:
-        x = x[0]
-
-    x = (x + 1) / 2                       # [-1,1] -> [0,1]
-    x = x.clamp(0, 1)
-
-    x = (x * 255).byte()
-    x = x.permute(1, 2, 0).numpy()        # (H,W,3)
-
-    img = Image.fromarray(x)
-    img.save(path)
 
 class DCTVAE(nn.Module):
     def __init__(self, *args, **kwargs):
