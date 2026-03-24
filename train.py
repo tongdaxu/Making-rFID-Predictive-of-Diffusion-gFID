@@ -455,7 +455,7 @@ def main(args):
                     accelerator.log({"samples": wandb.Image(array2grid(out_samples))})
                 else:
                     img = Image.fromarray(array2grid(out_samples))
-                    img_path = os.path.join(args.logging_dir, f"sample_{global_step:07d}.png")
+                    img_path = os.path.join(args.output_dir, f"sample_{global_step:07d}.png")
                     img.save(img_path)
                     hub_run.log_artifact('samples', img_path, step=global_step)
 
