@@ -1,6 +1,6 @@
 target: ifid.vae.simmim_vae.SimMIMVAE
 params:
-  ckpt_file: /video_ssd/kongzishang/xutongda/git/SimMIM/decoder_finetune_zero/checkpoints/decoder_ft_epoch_1.pth
+  ckpt_file: /video_ssd/kongzishang/xutongda/git/SimMIM/decoder_finetune_zero_160/checkpoints/decoder_ft_epoch_10.pth
 
   img_size: 256
   patch_size: 16
