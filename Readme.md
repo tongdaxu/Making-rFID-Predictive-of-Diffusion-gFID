@@ -1,5 +1,6 @@
 # Making Reconstruction FID Predictive of Diffusion Generation FID
 * Arxiv: https://arxiv.org/abs/2603.05630
+* Pretrained SiT models: https://huggingface.co/xutongda/Making-rFID-Predictive-of-Diffusion-gFID
 ## Brief
 * Reconstruction FID of VAE are often negatively correlated with generation FID of latent diffusion.
 * We slightly change the rFID computation into interpolated FID (iFID) to make it highly correlated to gFID.
@@ -82,6 +83,9 @@
     | REPAE-VAE    | 12.95 | 26.06 | 36.70 | REPAEVAE.yaml | SiT-XL/2, SiT-B/2 |
     | RAE          | 4.25 | - | 7.68 | RAE.yaml | SiT-XL/1, SiT-B/1 |
 
+## More about Pre-trained SiT Models
+* Our model released in https://huggingface.co/xutongda/Making-rFID-Predictive-of-Diffusion-gFID are trained by a private codebase, there could be slight difference and incompatibility. We are working on it.
+* We do recommend you to train SiTs from scratch using this opensourced codebase.
 
 ## To Include Your VAE in VAE Arena
 * implement your vae in a separate py fite in ./ifid/vae/, add config file in ./configs/
