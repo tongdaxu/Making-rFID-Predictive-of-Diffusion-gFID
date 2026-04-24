@@ -278,7 +278,7 @@ def main(args):
                 index = i * dist.get_world_size() + rank + total
                 Image.fromarray(sample).save(f"{sample_folder_dir}/{index:06d}.png")
 
-                assert(0)
+                # assert(0)
         total += global_batch_size
 
     # Make sure all processes have finished saving their samples before attempting to convert to .npz

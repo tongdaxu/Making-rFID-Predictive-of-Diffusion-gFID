@@ -183,6 +183,11 @@ def main(args):
     fake_in = torch.zeros([1, 3, args.resolution, args.resolution]).to(device)
     fake_z = vae.encode(fake_in)[0]
 
+    if accelerator.is_main_process:
+        logger.info(f"VAE fake_z shape: {tuple(fake_z.shape)}")
+        logger.info(f"VAE fake_z numel: {fake_z.numel()}")
+        logger.info(f"VAE fake_z mean/std: {fake_z.mean().item():.4f}/{fake_z.std().item():.4f}")
+
     if len(fake_z.shape) == 3:
         # 2d latent
         latent_size = fake_z.shape[-1]

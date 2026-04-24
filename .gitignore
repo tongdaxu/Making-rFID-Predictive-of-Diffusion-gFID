@@ -9,6 +9,7 @@ exps/
 samples/
 logs/
 wandb/
+vae_eval_outputs/
 Record.md
 
 acc_single.yaml
