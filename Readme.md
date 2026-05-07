@@ -1,4 +1,5 @@
 # Making Reconstruction FID Predictive of Diffusion Generation FID
+* Live Benchmark of Diffusion VAEs: https://tongdaxu.github.io/pages/ifid.html
 * Arxiv: https://arxiv.org/abs/2603.05630
 * Pretrained SiT models: https://huggingface.co/xutongda/Making-rFID-Predictive-of-Diffusion-gFID
 ## Brief
