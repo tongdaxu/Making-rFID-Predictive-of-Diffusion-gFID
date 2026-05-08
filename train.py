@@ -7,9 +7,8 @@ import math
 from pathlib import Path
 from collections import OrderedDict
 from omegaconf import OmegaConf
-import datetime
 from accelerate import Accelerator, InitProcessGroupKwargs
-from datetime import timedelta
+from datetime import timedelta, datetime
 from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration, set_seed
 import torch
@@ -17,13 +16,14 @@ from torch.utils.data import DataLoader
 from torchvision.utils import make_grid
 from tqdm.auto import tqdm
 import wandb
-
+from ifid.fid.psnr import get_psnr
 from ifid.dataset import CustomINH5Dataset
 from ifid.sit.sit import SiT_models
 from ifid.sit.samplers import euler_sampler
 from ifid.vae.utils import instantiate_from_config
 from PIL import Image 
 from accelerate.utils import DistributedDataParallelKwargs
+import lpips
 
 try:
     from turihub import Hub
@@ -40,14 +40,6 @@ def count_trainable_params(m):
 def preprocess_imgs_vae(imgs):
     # imgs: (B, C, H, W) -> (B, C, H, W), [0, 255] uint8 -> [-1, 1] float32
     return imgs.float() / 127.5 - 1.0
-
-
-def normalize_latents(latents, latents_scale, latents_bias):
-    return (latents - latents_bias) * latents_scale
-
-
-def denormalize_latents(latents, latents_scale, latents_bias):
-    return latents / latents_scale + latents_bias
 
 
 def array2grid(x):
@@ -178,7 +170,8 @@ def main(args):
     ys = ys.to(device)
     # Create sampling noise:
     n = ys.size(0)
-
+    if args.ploss:
+        loss_fn_vgg = lpips.LPIPS(net='vgg').to(device)
     # Create model:
     vae_config = OmegaConf.load(args.vae_config)
     vae = instantiate_from_config(vae_config).to(device)
@@ -212,6 +205,7 @@ def main(args):
         class_dropout_prob=args.cfg_prob,
         bn_momentum=args.bn_momentum,
         tshift=tshift,
+        prediction_internal=args.prediction_internal,
         **block_kwargs,
     )
 
@@ -271,7 +265,7 @@ def main(args):
         ckpt_path = f"{args.cont_dir}/checkpoints/{ckpt_name}"
 
         # If the checkpoint exists, we load the checkpoint and resume the training
-        ckpt = torch.load(ckpt_path, map_location="cpu")
+        ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
         model.load_state_dict(ckpt["model"])
         ema.load_state_dict(ckpt["ema"])
         (optimizer.load_state_dict(ckpt["opt"]),)
@@ -296,7 +290,7 @@ def main(args):
             )
         else:
             hub=Hub()
-            hub_project = hub.project('playground')
+            hub_project = hub.project('ispalgo_us')
             hub_exp = hub_project.experiments_api.experiment('tongda_xu_dev')
             hub_run = hub_exp.start_run(name=args.exp_name + "-" + datetime.now().strftime("%Y-%m-%d_%H-%M-%S"), enable_async=False)
 
@@ -325,6 +319,7 @@ def main(args):
                 vae.eval()
                 with torch.no_grad():
                     z = vae.encode(processed_image)
+                    xhat = vae.decode(z)
                 # 2). Backward pass: VAE, compute the VAE loss, backpropagate, and update the VAE; Then, compute the riminator loss and update the discriminator
                 #    loss_kwargs used for SiT forward function, create here and can be reused for both VAE and SiT
                 loss_kwargs = dict(
@@ -348,6 +343,14 @@ def main(args):
                 )
 
                 sit_loss = sit_outputs["denoising_loss"].mean()
+
+                if args.ploss:
+                    pred_x = accelerator.unwrap_model(vae).decode(sit_outputs["pred_x"])
+                    ploss = loss_fn_vgg(pred_x, processed_image).mean()
+                    sit_loss += ploss
+                else:
+                    ploss = None
+
                 accelerator.backward(sit_loss)
 
                 if accelerator.sync_gradients:
@@ -357,6 +360,8 @@ def main(args):
 
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
+
+                psnr = torch.mean(get_psnr(processed_image, xhat, zero_mean=True))
 
                 # 5). Update SiT EMA
                 if accelerator.sync_gradients:
@@ -383,13 +388,18 @@ def main(args):
                     .detach()
                     .item(),
                     "epoch": epoch,
+                    "psnr": accelerator.gather(psnr).mean().detach().item(),
                 }
+
+                if ploss is not None:
+                    logs["ploss"] = accelerator.gather(ploss).mean().detach().item()
 
                 progress_bar.set_postfix(**logs)
                 if Hub is None:
                     accelerator.log(logs, step=global_step)
                 else:
-                    hub_run.log_metrics(logs, step=global_step)
+                    if accelerator.is_main_process:
+                        hub_run.log_metrics(logs, step=global_step)
 
             if global_step % args.checkpointing_steps == 0 and global_step > 0:
                 if accelerator.is_main_process:
@@ -430,23 +440,9 @@ def main(args):
                         path_type=args.path_type,
                         heun=False,
                     ).to(torch.float32)
-                    latents_stats = unwrapped_model.extract_latents_stats()
-                    if len(samples.shape) == 4:
-                        latents_scale = latents_stats["latents_scale"].view(
-                            1, in_channels, 1, 1
-                        )
-                        latents_bias = latents_stats["latents_bias"].view(
-                            1, in_channels, 1, 1
-                        )
-                    else:
-                        latents_scale = latents_stats["latents_scale"].view(
-                            1, 1, in_channels
-                        )
-                        latents_bias = latents_stats["latents_bias"].view(
-                            1, 1, in_channels
-                        )
+                    samples = unwrapped_model.denormalize_latents(samples)
                     samples = accelerator.unwrap_model(vae).decode(
-                        denormalize_latents(samples, latents_scale, latents_bias)
+                        samples
                     )
                     samples = (samples + 1) / 2.0
                 out_samples = accelerator.gather(samples.to(torch.float32))
@@ -454,10 +450,11 @@ def main(args):
                 if Hub is None:
                     accelerator.log({"samples": wandb.Image(array2grid(out_samples))})
                 else:
-                    img = Image.fromarray(array2grid(out_samples))
-                    img_path = os.path.join(args.output_dir, f"sample_{global_step:07d}.png")
-                    img.save(img_path)
-                    hub_run.log_artifact('samples', img_path, step=global_step)
+                    if accelerator.is_main_process:
+                        img = Image.fromarray(array2grid(out_samples))
+                        img_path = os.path.join(args.output_dir, f"sample_{global_step:07d}.png")
+                        img.save(img_path)
+                        hub_run.log_artifact('samples', img_path, step=global_step)
 
                 logging.info("Generating EMA samples done.")
 
@@ -521,6 +518,10 @@ def parse_args(input_args=None):
     )
 
     parser.add_argument(
+        "--ploss", action=argparse.BooleanOptionalAction, default=False
+    )
+
+    parser.add_argument(
         "--mixed-precision", type=str, default="fp16", choices=["no", "fp16", "bf16"]
     )
 
@@ -574,6 +575,13 @@ def parse_args(input_args=None):
         default="v",
         choices=["v"],
         help="currently we only support v-prediction",
+    )
+    parser.add_argument(
+        "--prediction-internal",
+        type=str,
+        default="v",
+        choices=["v", "x"],
+        help="internal prediction type, could be x or v, only used for loss computation and does not affect the model architecture",
     )
     parser.add_argument("--cfg-prob", type=float, default=0.1)
     parser.add_argument(

@@ -29,13 +29,30 @@ import shutil
 
 from ifid.sit.sit import SiT_models
 from ifid.sit.samplers import euler_sampler, euler_maruyama_sampler, edict_sampler, edict_inverter
-from train import denormalize_latents
 from datetime import timedelta
 from omegaconf import OmegaConf
 from ifid.vae.utils import instantiate_from_config
 from ifid.fid.psnr import get_psnr
-from eval_intp import save_tensor_image
 import torch.nn.functional as F
+
+def save_tensor_image(x, path):
+    """
+    Save tensor of shape (1,3,256,256) with range [-1,1] to PNG
+    """
+    x = x.detach().cpu()
+
+    if x.dim() == 4:
+        x = x[0]
+
+    x = (x + 1) / 2                       # [-1,1] -> [0,1]
+    x = x.clamp(0, 1)
+
+    x = (x * 255).byte()
+    x = x.permute(1, 2, 0).numpy()        # (H,W,3)
+
+    img = Image.fromarray(x)
+    img.save(path)
+
 
 def create_npz_from_sample_folder(sample_dir, num=50_000):
     """
@@ -127,6 +144,8 @@ def main(args):
         class_dropout_prob=config.cfg_prob,
         bn_momentum=config.bn_momentum,
         tshift=tshift,
+        prediction_internal=config.prediction_internal,
+        bn_1d=config.bn_1d,
         **block_kwargs,
     ).to(device)
 
@@ -135,30 +154,16 @@ def main(args):
     state_dict = torch.load(
         os.path.join(args.exp_path, "checkpoints", train_step_str + ".pt"),
         map_location=f"cuda:{device}",
+        weights_only=False,
     )
     model.load_state_dict(state_dict["ema"], strict=False)
     model.eval()  # Important! To disable label dropout during sampling
 
-    if vae_1d:
-        latents_scale = (
-            state_dict["ema"]["bn.running_var"]
-            .rsqrt()
-            .view(1, 1, in_channels)
-            .to(device)
-        )
-        latents_bias = (
-            state_dict["ema"]["bn.running_mean"].view(1, 1, in_channels).to(device)
-        )
-    else:
-        latents_scale = (
-            state_dict["ema"]["bn.running_var"]
-            .rsqrt()
-            .view(1, in_channels, 1, 1)
-            .to(device)
-        )
-        latents_bias = (
-            state_dict["ema"]["bn.running_mean"].view(1, in_channels, 1, 1).to(device)
-        )
+    if "vae" in state_dict.keys():
+        miss_keys, unexp_keys = vae.load_state_dict(state_dict["vae"], strict=False)
+        print("loading vae")
+        print("missing: ", miss_keys)
+        print("unexp_keys: ", unexp_keys)
 
     del state_dict
     gc.collect()
@@ -254,13 +259,13 @@ def main(args):
                 raise NotImplementedError()
 
             samples = vae.decode(
-                denormalize_latents(samples, latents_scale, latents_bias)
+                model.denormalize_latents(samples)
             )
             samples = (samples + 1) / 2.0
 
             if samples_alt is not None:
                 samples_alt = vae.decode(
-                    denormalize_latents(samples_alt, latents_scale, latents_bias)
+                    model.denormalize_latents(samples_alt)
                 )
                 samples_alt = (samples_alt + 1) / 2.0
                 pred_psnr = get_psnr(samples, samples_alt, zero_mean=True)
@@ -278,7 +283,6 @@ def main(args):
                 index = i * dist.get_world_size() + rank + total
                 Image.fromarray(sample).save(f"{sample_folder_dir}/{index:06d}.png")
 
-                assert(0)
         total += global_batch_size
 
     # Make sure all processes have finished saving their samples before attempting to convert to .npz
