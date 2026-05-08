@@ -1,0 +1,3 @@
+target: ifid.vae.vtp.VTPVAE
+params:
+  ckpt_folder: MiniMaxAI/VTP-Small-f16d64

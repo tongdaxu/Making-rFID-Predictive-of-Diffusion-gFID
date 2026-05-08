@@ -1,0 +1,5 @@
+target: ifid.vae.flux2vae.Flux2VAE
+params:
+  ckpt_path: /share/xutongda/hfhome/flux2-dev/split_files/vae/flux2-vae.safetensors
+  resolution: 256
+  strict: true

@@ -3,12 +3,15 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+evalvae_out/
+nohup_logs/
 test/
 data/
 exps/
 samples/
 logs/
 wandb/
+vae_eval_outputs/
 Record.md
 
 acc_single.yaml
