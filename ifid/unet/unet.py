@@ -11,6 +11,17 @@ def mean_flat(x):
     """
     return torch.mean(x, dim=list(range(1, len(x.size()))))
 
+class ClassEmbedder(nn.Module):
+    def __init__(self, embed_dim, n_classes=1000):
+        super().__init__()
+        self.embedding = nn.Embedding(n_classes, embed_dim)
+
+    def forward(self, batch, key=None):
+        # this is for use in crossattn
+        c = batch[:, None]
+        c = self.embedding(c)
+        return c
+
 class UNet(nn.Module):
     """
     Diffusion model with a Transformer backbone.
@@ -46,7 +57,11 @@ class UNet(nn.Module):
 
         self.tshift = tshift
         self.bn.reset_running_stats()
-        self.pre_unet = F.pixel_unshuffle(self.patch_size)
+        self.pre_unet = nn.PixelUnshuffle(self.patch_size)
+
+        self.class_embedder = ClassEmbedder(
+            512, n_classes=self.num_classes+1,
+        )
         self.unet_model = UNetModel(
             image_size=(input_size//self.patch_size),
             in_channels=in_channels*(self.patch_size**2),
@@ -59,8 +74,9 @@ class UNet(nn.Module):
             use_spatial_transformer=True,
             transformer_depth=1,
             context_dim=512,
+            # num_classes=self.num_classes,
         )
-        self.post_unet = F.pixel_shuffle(self.patch_size)
+        self.post_unet = nn.PixelShuffle(self.patch_size)
 
     def shift_time(self, t):
         shifted_t = self.tshift * t / (1 + (self.tshift - 1) * t)
@@ -140,16 +156,10 @@ class UNet(nn.Module):
         # sample timesteps if not provided
         if time_input is None:
             if loss_kwargs["weighting"] == "uniform":
-                if self.vae_1d:
-                    time_input = torch.rand((normalized_x.shape[0], 1, 1))
-                else:
-                    time_input = torch.rand((normalized_x.shape[0], 1, 1, 1))
+                time_input = torch.rand((normalized_x.shape[0], 1, 1, 1))
             elif loss_kwargs["weighting"] == "lognormal":
                 # sample timestep according to log-normal distribution of sigmas following EDM
-                if self.vae_1d:
-                    rnd_normal = torch.randn((normalized_x.shape[0], 1, 1, 1))
-                else:
-                    rnd_normal = torch.rand((normalized_x.shape[0], 1, 1, 1))
+                rnd_normal = torch.rand((normalized_x.shape[0], 1, 1, 1))
                 sigma = rnd_normal.exp()
                 if loss_kwargs["path_type"] == "linear":
                     time_input = sigma / (1 + sigma)
@@ -186,7 +196,7 @@ class UNet(nn.Module):
         y[drop_mask] = self.num_classes
 
         # unet forward
-        model_output = self.post_unet(self.unet_model(x=self.pre_unet(model_input), timesteps=time_input, y=y))
+        model_output = self.post_unet(self.unet_model(x=self.pre_unet(model_input), timesteps=time_input[:,0,0,0], context=self.class_embedder(y)))
 
         # loss computation
         denoising_loss = mean_flat((model_output - model_target) ** 2)
@@ -202,7 +212,7 @@ class UNet(nn.Module):
 
     @torch.no_grad()
     def inference(self, x, t, y):
-        model_output = self.post_unet(self.unet_model(x=self.pre_unet(x), timesteps=t, y=y))
+        model_output = self.post_unet(self.unet_model(x=self.pre_unet(x), timesteps=t, context=self.class_embedder(y)))
         return model_output
 
     @torch.no_grad()
