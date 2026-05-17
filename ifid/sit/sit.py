@@ -11,7 +11,7 @@ import torch.nn as nn
 import numpy as np
 import math
 from timm.models.vision_transformer import PatchEmbed, Attention, Mlp
-
+from ifid.unet.unet import UNet_1, UNet_2
 
 def mean_flat(x):
     """
@@ -805,7 +805,6 @@ def SiT_S_4(**kwargs):
 def SiT_S_8(**kwargs):
     return SiT(depth=12, hidden_size=384, patch_size=8, num_heads=6, **kwargs)
 
-
 SiT_models = {
     "SiT-B/1D": SiT_B_1D,
     "SiT-XL/1D": SiT_XL_1D,
@@ -825,4 +824,6 @@ SiT_models = {
     "SiT-S/2": SiT_S_2,
     "SiT-S/4": SiT_S_4,
     "SiT-S/8": SiT_S_8,
+    "UNet/1": UNet_1,
+    "UNet/2": UNet_2,
 }

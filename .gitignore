@@ -3,12 +3,16 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+prev_exps/
+nohup_logs_recon_only/
+nohup_logs_fix/
 evalvae_out/
 nohup_logs/
 test/
 data/
 exps/
 samples/
+samples_fix/
 logs/
 wandb/
 vae_eval_outputs/

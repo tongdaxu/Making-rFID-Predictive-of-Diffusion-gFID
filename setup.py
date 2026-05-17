@@ -6,6 +6,7 @@ setup(
     packages=[
         "ifid",
         "ifid.sit",
+        "ifid.unet",
         "ifid.fid",
         "ifid.vae",
         "ifid.vae.unified_ae",
