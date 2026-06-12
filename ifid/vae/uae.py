@@ -16,7 +16,7 @@ class UAE(nn.Module):
                 repo_id=repo_id,
                 filename=fname,
             )
-        state_dict = torch.load(ckpt_path, map_location="cpu")
+        state_dict = torch.load(ckpt_path, map_location="cpu", weights_only=False)
         self.uae.load_state_dict(state_dict["model"])
 
     def encode(

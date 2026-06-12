@@ -220,6 +220,9 @@ def get_score_from_velocity(vt, xt, t, path_type="linear", eps=0.0):
 
     return score
 
+def denorm_fun(latents, latents_scale, latents_bias):
+    return latents / (latents_scale + 1e-5) + latents_bias
+
 
 class SiT(nn.Module):
     """
@@ -242,6 +245,10 @@ class SiT(nn.Module):
         bn_momentum=0.1,
         vae_1d=False,
         tshift=1.0,
+        prediction_internal="v",
+        tk_drop=-1,
+        tk_drop_mode="drop",
+        tk_drop_param=1,
         **block_kwargs,  # fused_attn
     ):
         super().__init__()
@@ -252,6 +259,9 @@ class SiT(nn.Module):
         self.num_heads = num_heads
         self.num_classes = num_classes
         self.vae_1d = vae_1d
+        self.prediction_internal = prediction_internal
+        self.tk_drop = tk_drop
+        self.tk_drop_mode = tk_drop_mode
 
         if self.vae_1d:
             self.x_embedder = nn.Linear(in_channels, hidden_size)
@@ -303,10 +313,57 @@ class SiT(nn.Module):
         self.bn.reset_running_stats()
         self.initialize_weights()
         self.encoder_depth = 8
+        self.t_eps = 4e-2
+        self.p = tk_drop_param
 
     def shift_time(self, t):
         shifted_t = self.tshift * t / (1 + (self.tshift - 1) * t)
         return shifted_t
+
+    def normalize_latents(self, z):
+        bs = z.shape[0]
+        if self.vae_1d:
+            normalized_z = self.bn(z.transpose(1, 2)).transpose(1, 2)
+            if self.tk_drop > 0:
+                if self.tk_drop_mode == "drop":
+                    prob = torch.ones(bs, 1, 1).to(device=z.device, dtype=z.dtype) * self.p
+                    normalized_z[:, :, self.tk_drop:] = normalized_z[:, :, self.tk_drop:] * torch.bernoulli(prob)
+                elif self.tk_drop_mode == "scale":
+                    normalized_z[:, :, self.tk_drop:] = normalized_z[:, :, self.tk_drop:] * self.p
+        else:
+            normalized_z = self.bn(z)
+            if self.tk_drop > 0:
+                if self.tk_drop_mode == "drop":
+                    prob = torch.ones(bs, 1, 1, 1).to(device=z.device, dtype=z.dtype) * self.p
+                    normalized_z[:, self.tk_drop:, :, :] = normalized_z[:, self.tk_drop:, :, :] * torch.bernoulli(prob)
+                elif self.tk_drop_mode == "scale":
+                    normalized_z[:, self.tk_drop:, :, :] = normalized_z[:, self.tk_drop:, :, :] * self.p
+        return normalized_z
+
+    def denormalize_latents(self, z):
+        if self.tk_drop > 0 and self.tk_drop_mode == "scale":
+            if self.vae_1d:
+                z[:, :, self.tk_drop:] = z[:, :, self.tk_drop:] / self.p
+            else:
+                z[:, self.tk_drop:, :, :] = z[:, self.tk_drop:, :, :] / self.p
+
+        latents_stats = self.extract_latents_stats()
+        if len(z.shape) == 4:
+            latents_scale = latents_stats["latents_scale"].view(
+                1, self.in_channels, 1, 1
+            )
+            latents_bias = latents_stats["latents_bias"].view(
+                1, self.in_channels, 1, 1
+            )
+        else:
+            latents_scale = latents_stats["latents_scale"].view(
+                1, 1, self.in_channels
+            )
+            latents_bias = latents_stats["latents_bias"].view(
+                1, 1, self.in_channels
+            )
+        z_denorm = denorm_fun(z, latents_scale, latents_bias)
+        return z_denorm
 
     def initialize_weights(self):
         # Initialize transformer layers:
@@ -418,6 +475,7 @@ class SiT(nn.Module):
         loss_kwargs,
         time_input=None,
         noises=None,
+        align_only=False,
     ):
         """
         Forward pass of SiT, integrating the loss function computation
@@ -428,11 +486,9 @@ class SiT(nn.Module):
         time_input: optionally provide a tensor of timesteps to use for the forward pass, otherwise sample from a distribution
         noises: optionally provide a tensor of noises to use for the forward pass, otherwise sample from a distribution
         """
+        x_ori = x.clone()
         # Normalize the input x with batch norm running stats
-        if self.vae_1d:
-            normalized_x = self.bn(x.transpose(1, 2)).transpose(1, 2)
-        else:
-            normalized_x = self.bn(x)
+        normalized_x = self.normalize_latents(x)
 
         # sample timesteps if not provided
         if time_input is None:
@@ -459,6 +515,7 @@ class SiT(nn.Module):
         time_input = time_input.to(device=normalized_x.device, dtype=normalized_x.dtype)
 
         time_input = self.shift_time(time_input)
+        time_input = time_input.clamp(min=self.t_eps)  # avoid t=0 which may cause instability for v prediction
 
         # sample noises if not provided
         if noises is None:
@@ -471,8 +528,11 @@ class SiT(nn.Module):
             time_input, path_type=loss_kwargs["path_type"]
         )
 
+        # zt = (1-t) x + t eps
         model_input = alpha_t * normalized_x + sigma_t * noises
         if loss_kwargs["prediction"] == "v":
+            # v = - x + eps
+            # v = (zt - x) / t
             model_target = d_alpha_t * normalized_x + d_sigma_t * noises
         else:
             raise NotImplementedError()  # TODO: add x or eps prediction
@@ -497,10 +557,37 @@ class SiT(nn.Module):
         if not self.vae_1d:
             x = self.unpatchify(x)  # (N, out_channels, H, W)
 
+        if self.prediction_internal == "x":
+            pred_x_normalized = x
+            x = (model_input - x) / time_input
+        elif self.prediction_internal == "v":
+            pred_x_normalized = model_input - time_input * x
+            x = x
+        else:
+            raise NotImplementedError()
+            # from x prediction to v prediction:
+
         # loss computation
+
+        # if self.tk_drop > 0:
+        #     prob = torch.ones(N, 1, 1, 1).to(device=x.device, dtype=x.dtype) * self.p
+        #     sampling_mask = torch.bernoulli(prob)
+        #     x[:, self.tk_drop:, :, :] = x[:, self.tk_drop:, :, :] * sampling_mask
+        #     model_target[:, self.tk_drop:, :, :] = model_target[:, self.tk_drop:, :, :] * sampling_mask
+
         denoising_loss = mean_flat((x - model_target) ** 2)
 
+        if not self.vae_1d:
+            mean_x = torch.mean(x_ori, dim=1, keepdim=True)
+            std_x = torch.std(x_ori, dim=1, keepdim=True)
+        else:
+            mean_x = torch.mean(x_ori, dim=2, keepdim=True)
+            std_x = torch.std(x_ori, dim=2, keepdim=True)
+
+        pred_x = pred_x_normalized * std_x + mean_x
+
         ret_dict = {
+            "pred_x": pred_x,
             "model_output": x,
             "denoising_loss": denoising_loss,
             "time_input": time_input,
@@ -512,6 +599,7 @@ class SiT(nn.Module):
 
     @torch.no_grad()
     def inference(self, x, t, y):
+        zt = x.clone()
         x = (
             self.x_embedder(x) + self.pos_embed
         )  # (N, T, D), where T = H * W / patch_size ** 2
@@ -526,6 +614,13 @@ class SiT(nn.Module):
         x = self.final_layer(x, c)  # (N, T, patch_size ** 2 * out_channels)
         if not self.vae_1d:
             x = self.unpatchify(x)  # (N, out_channels, H, W)
+        if self.prediction_internal == "x":
+            x = (zt - x) / t[:,None,None,None]
+        elif self.prediction_internal == "v" or self.prediction_internal is None:
+            x = x
+        else:
+            raise NotImplementedError()
+
         return x
 
     @torch.no_grad()
