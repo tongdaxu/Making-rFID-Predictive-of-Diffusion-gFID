@@ -3,7 +3,11 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+score_j/
+third_party/
+losses/
 prev_exps/
+prev_exps_unet/
 nohup_logs_recon_only/
 nohup_logs_fix/
 evalvae_out/
@@ -11,6 +15,7 @@ nohup_logs/
 test/
 data/
 exps/
+exps_unet/
 samples/
 samples_fix/
 logs/

@@ -782,7 +782,8 @@ class GeneralDecoder(nn.Module):
 
     def set_band_mask_dim(self, num_bands: int) -> None:
         fusion = getattr(self, "band_mask_fusion", "scale_shift")
-        if fusion == "noise":
+        # if fusion == "noise":
+        if fusion in ("noise", "none"):
             self.band_mask_dim = 0
             self.band_mask_embed = None
             self.band_mask_proj = None
@@ -841,7 +842,8 @@ class GeneralDecoder(nn.Module):
         hidden_states = x + decoder_pos_embed
 
         fusion = getattr(self, "band_mask_fusion", "scale_shift")
-        if fusion == "noise":
+        # if fusion == "noise":
+        if fusion in ("noise", "none"):
             pass
         elif fusion == "concat":
             if self.band_mask_proj is None:

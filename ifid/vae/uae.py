@@ -11,10 +11,15 @@ class UAE(nn.Module):
         super().__init__()
         self.uae = instantiate_from_config(uae_config)
         if not os.path.exists(ckpt_path):
-            repo_id, fname = ckpt_path.rsplit("/", 1)
+            # repo_id, fname = ckpt_path.rsplit("/", 1)
+            # ckpt_path = hf_hub_download(
+            #     repo_id=repo_id,
+            #     filename=fname,
+            # )
             ckpt_path = hf_hub_download(
-                repo_id=repo_id,
-                filename=fname,
+                repo_id="weepiess2383/UAE",
+                subfolder="checkpoints/DINOv2-B",
+                filename="ep-last.pt",
             )
         state_dict = torch.load(ckpt_path, map_location="cpu")
         self.uae.load_state_dict(state_dict["model"])
