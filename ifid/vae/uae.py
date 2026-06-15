@@ -12,6 +12,10 @@ class UAEVAE(nn.Module):
             repo_id = f"{a}/{b}"
             ckpt_path = hf_hub_download(repo_id=repo_id, filename=filename)
         self.uae = UAE(**uae_config)
+        ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)['model']
+        missing_keys, unexpected_keys = self.uae.load_state_dict(ckpt)
+        print("missing_keys: ", missing_keys)
+        print("unexpected_keys: ", unexpected_keys)
 
     def encode(self, x):
         return self.uae.encode(x)
