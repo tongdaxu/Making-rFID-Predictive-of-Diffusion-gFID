@@ -13,9 +13,7 @@ def _add_to_registry(name: str, cls: Type) -> Type:
     return cls
 
 
-def register_encoder(
-    cls: Optional[Type] = None, *, name: Optional[str] = None
-) -> Union[Callable[[Type], Type], Type]:
+def register_encoder(cls: Optional[Type] = None, *, name: Optional[str] = None) -> Union[Callable[[Type], Type], Type]:
     """Register an encoder class in ``ARCHS``.
 
     Can be used either as ``@register_encoder()`` (optionally passing ``name``) or
@@ -32,7 +30,7 @@ def register_encoder(
     return decorator(cls)
 
 
-# Import modules that perform registration on import.
 from . import dinov2
 from . import siglip2
 from . import mae
+from . import clip
