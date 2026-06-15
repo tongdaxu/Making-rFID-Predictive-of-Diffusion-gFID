@@ -1,24 +1,13 @@
-target: ifid.vae.uae.UAE
-
+target: ifid.vae.uae.UAEVAE
 params:
-  uae_config:
-    target: ifid.vae.unified_ae.UnifiedUAE
-    params:
-      encoder_cls: 'Dinov2withNorm'
-      encoder_config_path: 'facebook/dinov2-with-registers-base'
-      encoder_input_size: 224
-
-      encoder_params:
-        dinov2_path: 'facebook/dinov2-with-registers-base'
-        normalize: true
-
-      encoder_trainable: false
-
-      decoder_config_path: '/video_ssd/kongzishang/xutongda/git/IFID/ifid/vae/unified_ae/configs/decoder/ViTXL'
-
-      noise_tau: 0.0
-      reshape_to_2d: true
-
-      frequency_config: null
-
   ckpt_path: weepiess2383/UAE/checkpoints/DINOv2-B/ep-last.pt
+  uae_config:
+    encoder_cls: 'Dinov2withNorm'
+    encoder_config_path: 'facebook/dinov2-with-registers-base'
+    encoder_input_size: 224
+    encoder_params:
+      dinov2_path: 'facebook/dinov2-with-registers-base'
+      normalize: true
+    decoder_config_path: './ifid/vae/unified_ae/'
+    noise_tau: 0.0
+    reshape_to_2d: true
