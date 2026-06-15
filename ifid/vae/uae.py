@@ -18,10 +18,13 @@ class UAEVAE(nn.Module):
         print("unexpected_keys: ", unexpected_keys)
 
     def encode(self, x):
+        x = (x + 1.0) / 2.0
         return self.uae.encode(x)
 
     def decode(self, z):
-        return self.uae.decode(z)
+        xhat = self.uae.decode(z)
+        xhat = xhat * 2.0 - 1.0
+        return xhat
 
     def forward(self, x):
         z = self.encode(x)
