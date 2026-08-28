@@ -11,3 +11,11 @@ params:
     decoder_config_path: './ifid/vae/unified_ae/'
     noise_tau: 0.0
     reshape_to_2d: true
+    frequency_config:
+      freq_order: zigzag
+      freq_transform: dct
+      band_split:
+        enabled: true
+        mode: low
+        count: 256
+  mode: frequency

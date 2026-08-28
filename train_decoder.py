@@ -19,12 +19,18 @@ import wandb
 
 from ifid.dataset import CustomINH5Dataset
 from ifid.sit.sit import SiT_models
-from ifid.sit.samplers import euler_sampler
+from ifid.sit.samplers import euler_sampler, euler_maruyama_sampler
 from ifid.vae.utils import instantiate_from_config
 from ifid.fid.psnr import get_psnr
+from datetime import timedelta, datetime
+from PIL import Image 
 
 from accelerate.utils import DistributedDataParallelKwargs
 
+try:
+    from turihub import Hub
+except:
+    Hub = None
 
 logger = get_logger(__name__)
 
@@ -36,14 +42,6 @@ def count_trainable_params(m):
 def preprocess_imgs_vae(imgs):
     # imgs: (B, C, H, W) -> (B, C, H, W), [0, 255] uint8 -> [-1, 1] float32
     return imgs.float() / 127.5 - 1.0
-
-
-def normalize_latents(latents, latents_scale, latents_bias):
-    return (latents - latents_bias) * latents_scale
-
-
-def denormalize_latents(latents, latents_scale, latents_bias):
-    return latents / latents_scale + latents_bias
 
 
 def array2grid(x):
@@ -235,13 +233,20 @@ def main(args):
 
     # Define the optimizers for SiT, VAE, and VAE loss function separately
     optimizer = torch.optim.AdamW(
-        list(model.parameters()) + list(vae.parameters()),
+        [
+            {
+                "params": model.parameters(),
+                "betas": (args.adam_beta1, args.adam_beta2),
+            },
+            {
+                "params": vae.parameters(),
+                "betas": (args.adam_beta1, 0.969),  # Use a smaller beta2 for the VAE optimizer
+            },
+        ],
         lr=args.learning_rate,
-        betas=(args.adam_beta1, args.adam_beta2),
         weight_decay=args.adam_weight_decay,
         eps=args.adam_epsilon,
     )
-
     # Setup data
     train_dataset = CustomINH5Dataset(args.data_dir)
     local_batch_size = int(args.batch_size // accelerator.num_processes)
@@ -271,7 +276,7 @@ def main(args):
         ckpt_path = f"{args.cont_dir}/checkpoints/{ckpt_name}"
 
         # If the checkpoint exists, we load the checkpoint and resume the training
-        ckpt = torch.load(ckpt_path, map_location="cpu")
+        ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
         model.load_state_dict(ckpt["model"])
         ema.load_state_dict(ckpt["ema"])
         (optimizer.load_state_dict(ckpt["opt"]),)
@@ -288,11 +293,17 @@ def main(args):
 
     if accelerator.is_main_process:
         tracker_config = vars(copy.deepcopy(args))
-        accelerator.init_trackers(
-            project_name="diffusion vae arena",
-            config=tracker_config,
-            init_kwargs={"wandb": {"name": f"{args.exp_name}"}},
-        )
+        if Hub is None:
+            accelerator.init_trackers(
+                project_name="diffusion vae arena",
+                config=tracker_config,
+                init_kwargs={"wandb": {"name": f"{args.exp_name}"}},
+            )
+        else:
+            hub=Hub()
+            hub_project = hub.project('ispalgo_us')
+            hub_exp = hub_project.experiments_api.experiment('tongda_xu_dev')
+            hub_run = hub_exp.start_run(name=args.exp_name + "-" + datetime.now().strftime("%Y-%m-%d_%H-%M-%S"), enable_async=False)
 
     progress_bar = tqdm(
         range(0, args.max_train_steps),
@@ -385,7 +396,11 @@ def main(args):
                 }
 
                 progress_bar.set_postfix(**logs)
-                accelerator.log(logs, step=global_step)
+                if Hub is None:
+                    accelerator.log(logs, step=global_step)
+                else:
+                    if accelerator.is_main_process:
+                        hub_run.log_metrics(logs, step=global_step)
 
             if global_step % args.checkpointing_steps == 0 and global_step > 0:
                 if accelerator.is_main_process:
@@ -416,7 +431,7 @@ def main(args):
                 vae.eval()
                 with torch.no_grad():
                     unwrapped_model = accelerator.unwrap_model(model)
-                    samples = euler_sampler(
+                    samples = euler_maruyama_sampler(
                         unwrapped_model,
                         xT,
                         ys,
@@ -427,22 +442,7 @@ def main(args):
                         path_type=args.path_type,
                         heun=False,
                     ).to(torch.float32)
-                    latents_stats = unwrapped_model.extract_latents_stats()
-                    if len(samples.shape) == 4:
-                        latents_scale = latents_stats["latents_scale"].view(
-                            1, in_channels, 1, 1
-                        )
-                        latents_bias = latents_stats["latents_bias"].view(
-                            1, in_channels, 1, 1
-                        )
-                    else:
-                        latents_scale = latents_stats["latents_scale"].view(
-                            1, 1, in_channels
-                        )
-                        latents_bias = latents_stats["latents_bias"].view(
-                            1, 1, in_channels
-                        )
-                    denorm_z = denormalize_latents(samples, latents_scale, latents_bias)
+                    denorm_z = unwrapped_model.denormalize_latents(samples)
                     samples = accelerator.unwrap_model(vae).decode(
                         denorm_z
                     )
@@ -455,8 +455,21 @@ def main(args):
 
                 out_samples = accelerator.gather(samples.to(torch.float32))
                 out_samples_inv = accelerator.gather(samples_inv.to(torch.float32))
-                accelerator.log({"samples": wandb.Image(array2grid(out_samples))}, step=global_step)
-                accelerator.log({"samples_inv": wandb.Image(array2grid(out_samples_inv))}, step=global_step)
+                
+                if Hub is None:
+                    accelerator.log({"samples": wandb.Image(array2grid(out_samples))}, step=global_step)
+                    accelerator.log({"samples_inv": wandb.Image(array2grid(out_samples_inv))}, step=global_step)
+                else:
+                    if accelerator.is_main_process:
+                        img = Image.fromarray(array2grid(out_samples))
+                        img_path = os.path.join(args.output_dir, f"sample_{global_step:07d}.png")
+                        img.save(img_path)
+                        hub_run.log_artifact('samples', img_path, step=global_step)
+
+                        img_inv = Image.fromarray(array2grid(out_samples_inv))
+                        img_inv_path = os.path.join(args.output_dir, f"sample_inv_{global_step:07d}.png")
+                        img_inv.save(img_inv_path)
+                        hub_run.log_artifact('samples_inv', img_inv_path, step=global_step)
 
                 logging.info("Generating EMA samples done.")
 
@@ -585,6 +598,13 @@ def parse_args(input_args=None):
 
     # vae params
     parser.add_argument("--vae-config", type=str, default="")
+    parser.add_argument(
+        "--prediction-internal",
+        type=str,
+        default="v",
+        choices=["v", "x"],
+        help="internal prediction type, could be x or v, only used for loss computation and does not affect the model architecture",
+    )
 
     if input_args is not None:
         args = parser.parse_args(input_args)

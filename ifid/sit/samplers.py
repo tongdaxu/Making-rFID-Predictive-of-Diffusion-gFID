@@ -54,10 +54,12 @@ def euler_sampler(
     guidance_low=0.0,
     guidance_high=1.0,
     path_type="linear",  # not used, just for compatability
+    y_null=None,
 ):
     # setup conditioning
     if cfg_scale > 1.0:
-        y_null = torch.tensor([1000] * y.size(0), device=y.device)
+        if y_null is None:
+            y_null = torch.tensor([1000] * y.size(0), device=y.device)
     _dtype = latents.dtype
     t_steps = torch.linspace(1, 0, num_steps + 1, dtype=torch.float64)
     t_steps = model.shift_time(t_steps)
@@ -84,6 +86,7 @@ def euler_sampler(
             if cfg_scale > 1.0 and t_cur <= guidance_high and t_cur >= guidance_low:
                 d_cur_cond, d_cur_uncond = d_cur.chunk(2)
                 d_cur = d_cur_uncond + cfg_scale * (d_cur_cond - d_cur_uncond)
+
             x_next = x_cur + (t_next - t_cur) * d_cur
             if heun and (i < num_steps - 1):
                 if cfg_scale > 1.0 and t_cur <= guidance_high and t_cur >= guidance_low:
@@ -157,10 +160,14 @@ def euler_maruyama_sampler(
     guidance_low=0.0,
     guidance_high=1.0,
     path_type="linear",
+    y_mask=None,
+    y_null=None,
+    y_null_mask=None,
 ):
     # setup conditioning
     if cfg_scale > 1.0:
-        y_null = torch.tensor([1000] * y.size(0), device=y.device)
+        if y_null is None:
+            y_null = torch.tensor([1000] * y.size(0), device=y.device)
 
     _dtype = latents.dtype
 
@@ -177,10 +184,12 @@ def euler_maruyama_sampler(
             if cfg_scale > 1.0 and t_cur <= guidance_high and t_cur >= guidance_low:
                 model_input = torch.cat([x_cur] * 2, dim=0)
                 y_cur = torch.cat([y, y_null], dim=0)
+                y_mask_cur = torch.cat([y_mask, y_null_mask], dim=0) if y_mask is not None and y_null_mask is not None else None
             else:
                 model_input = x_cur
                 y_cur = y
-            kwargs = dict(y=y_cur)
+                y_mask_cur = None
+            kwargs = dict(y=y_cur, y_mask=y_mask_cur)
             time_input = (
                 torch.ones(model_input.size(0)).to(device=device, dtype=torch.float64)
                 * t_cur

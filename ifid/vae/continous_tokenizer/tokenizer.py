@@ -14,7 +14,6 @@ from ifid.vae.continous_tokenizer.quantizers.kl import DiagonalGaussianDistribut
 from ifid.vae.continous_tokenizer.quantizers.softvq import SoftVectorQuantizer
 
 from timm import create_model
-from cont.modelling.jet import Jet
 
 from torch.distributions import Normal
 import numpy as np

@@ -133,7 +133,7 @@ class SVGEXPORT(nn.Module):
 
     def init_from_ckpt(self, path, ignore_keys=list()):
         """Load checkpoint with optional key filtering."""
-        sd = torch.load(path, map_location="cpu")["state_dict"]
+        sd = torch.load(path, map_location="cpu", weights_only=False)["state_dict"]
         for k in list(sd.keys()):
             if any(k.startswith(ik) for ik in ignore_keys):
                 print(f"Deleting key {k} from state_dict.")

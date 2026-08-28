@@ -7,9 +7,8 @@ import math
 from pathlib import Path
 from collections import OrderedDict
 from omegaconf import OmegaConf
-
 from accelerate import Accelerator, InitProcessGroupKwargs
-from datetime import timedelta
+from datetime import timedelta, datetime
 from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration, set_seed
 import torch
@@ -17,13 +16,19 @@ from torch.utils.data import DataLoader
 from torchvision.utils import make_grid
 from tqdm.auto import tqdm
 import wandb
-import torch.nn.functional as F
+from ifid.fid.psnr import get_psnr
 from ifid.dataset import CustomINH5Dataset
 from ifid.sit.sit import SiT_models
 from ifid.sit.samplers import euler_sampler
-from ifid.vae.utils import instantiate_from_config
-
+from ifid.vae.utils import instantiate_from_config, load_encoders
+from ifid.loss.losses import ReconstructionLoss_Simple
+from PIL import Image 
 from accelerate.utils import DistributedDataParallelKwargs
+import lpips
+from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
+from torchvision.transforms import Normalize
+
+Hub = None
 
 logger = get_logger(__name__)
 
@@ -35,14 +40,6 @@ def count_trainable_params(m):
 def preprocess_imgs_vae(imgs):
     # imgs: (B, C, H, W) -> (B, C, H, W), [0, 255] uint8 -> [-1, 1] float32
     return imgs.float() / 127.5 - 1.0
-
-
-def normalize_latents(latents, latents_scale, latents_bias):
-    return (latents - latents_bias) * latents_scale
-
-
-def denormalize_latents(latents, latents_scale, latents_bias):
-    return latents / latents_scale + latents_bias
 
 
 def array2grid(x):
@@ -122,6 +119,18 @@ def requires_grad(model, flag=True):
         p.requires_grad = flag
 
 
+def preprocess_raw_image(x, enc_type):
+    resolution = x.shape[-1]
+    if 'dinov2' in enc_type:
+        x = x / 255.
+        x = Normalize(IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD)(x)
+        x = torch.nn.functional.interpolate(x, 224 * (resolution // 256), mode='bicubic')
+    else:
+        raise NotImplementedError
+
+    return x
+
+
 #################################################################################
 #                                  Training Loop                                #
 #################################################################################
@@ -173,17 +182,36 @@ def main(args):
     ys = ys.to(device)
     # Create sampling noise:
     n = ys.size(0)
-
+    if args.ploss:
+        loss_fn_vgg = lpips.LPIPS(net='vgg').to(device)
     # Create model:
     vae_config = OmegaConf.load(args.vae_config)
     vae = instantiate_from_config(vae_config).to(device)
-    vae.eval()
 
-    for name, param in vae.named_parameters():
-        param.requires_grad_(False)
+    loss_cfg = OmegaConf.load(args.loss_cfg_path)
+
+    with accelerator.local_main_process_first():
+        vae_loss_fn = ReconstructionLoss_Simple(
+            loss_cfg
+        ).to(device)
+
+    if args.enc_type != None:
+        with accelerator.local_main_process_first():
+            encoders, encoder_types, architectures = load_encoders(
+                args.enc_type, device, args.resolution
+            )
+    else:
+        raise NotImplementedError()
+
+    z_dims = [encoder.embed_dim for encoder in encoders] if args.enc_type != 'None' else [0]
 
     fake_in = torch.zeros([1, 3, args.resolution, args.resolution]).to(device)
     fake_z = vae.encode(fake_in)[0]
+
+    if accelerator.is_main_process:
+        logger.info(f"VAE fake_z shape: {tuple(fake_z.shape)}")
+        logger.info(f"VAE fake_z numel: {fake_z.numel()}")
+        logger.info(f"VAE fake_z mean/std: {fake_z.mean().item():.4f}/{fake_z.std().item():.4f}")
 
     if len(fake_z.shape) == 3:
         # 2d latent
@@ -199,7 +227,6 @@ def main(args):
         assert 0
 
     tshift = math.sqrt(float(fake_z.numel()) / 4096.0)
-
     block_kwargs = {"fused_attn": args.fused_attn, "qk_norm": args.qk_norm}
     model = SiT_models[args.model](
         input_size=latent_size,
@@ -208,12 +235,17 @@ def main(args):
         class_dropout_prob=args.cfg_prob,
         bn_momentum=args.bn_momentum,
         tshift=tshift,
+        prediction_internal=args.prediction_internal,
+        tk_drop=args.token_drop,
+        tk_drop_mode=args.token_drop_mode,
+        tk_drop_param=args.token_drop_param,
+        tk_drop_dim=args.token_drop_dim,
+        z_dims=z_dims,
         **block_kwargs,
     )
 
-    model = model.to(device)
-
     # make a copy of the model for EMA
+    model = model.to(device)
     ema = copy.deepcopy(model).to(
         device
     )  # Create an EMA of the model for use after training
@@ -222,48 +254,9 @@ def main(args):
     # Apply SyncBN if more than 1 GPU is used
     if accelerator.use_distributed:
         model = torch.nn.SyncBatchNorm.convert_sync_batchnorm(model)
-    
+
     if accelerator.is_main_process:
         logger.info(f"SiT Parameters: {sum(p.numel() for p in model.parameters()):,}")
-
-    # Create teacher model:
-    vae_teacher_config = OmegaConf.load(args.vae_teacher_config)
-    vae_teacher = instantiate_from_config(vae_teacher_config).to(device)
-    vae_teacher.eval()
-
-    fake_z_teacher = vae_teacher.encode(fake_in)[0]
-
-    if len(fake_z_teacher.shape) == 3:
-        # 2d latent
-        latent_size_teacher = fake_z_teacher.shape[-1]
-        in_channels_teacher = fake_z_teacher.shape[0]
-    elif len(fake_z.shape) == 2:
-        # 1d latent
-        latent_size_teacher = fake_z_teacher.shape[0]
-        in_channels_teacher = fake_z_teacher.shape[-1]
-    else:
-        assert 0
-
-    block_kwargs = {"fused_attn": args.fused_attn, "qk_norm": args.qk_norm}
-    model_teacher = SiT_models[args.model](
-        input_size=latent_size_teacher,
-        in_channels=in_channels_teacher,
-        num_classes=args.num_classes,
-        class_dropout_prob=args.cfg_prob,
-        bn_momentum=args.bn_momentum,
-        tshift=tshift,
-        **block_kwargs,
-    )
-
-    # make a copy of the model for EMA
-    model_teacher = model_teacher.to(device)
-    model_teacher.eval()
-
-    for name, param in vae_teacher.named_parameters():
-        param.requires_grad_(False)
-
-    for name, param in model_teacher.named_parameters():
-        param.requires_grad_(False)
 
     # Setup optimizer (we used default Adam betas=(0.9, 0.999) and a constant learning rate of 1e-4 in our paper):
     if args.allow_tf32:
@@ -273,6 +266,13 @@ def main(args):
     # Define the optimizers for SiT, VAE, and VAE loss function separately
     optimizer = torch.optim.AdamW(
         model.parameters(),
+        lr=args.learning_rate,
+        betas=(args.adam_beta1, args.adam_beta2),
+        weight_decay=args.adam_weight_decay,
+        eps=args.adam_epsilon,
+    )
+    optimizer_vae = torch.optim.AdamW(
+        vae.parameters(),
         lr=args.learning_rate,
         betas=(args.adam_beta1, args.adam_beta2),
         weight_decay=args.adam_weight_decay,
@@ -307,10 +307,11 @@ def main(args):
         ckpt_path = f"{args.cont_dir}/checkpoints/{ckpt_name}"
 
         # If the checkpoint exists, we load the checkpoint and resume the training
-        ckpt = torch.load(ckpt_path, map_location="cpu")
+        ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
         model.load_state_dict(ckpt["model"])
         ema.load_state_dict(ckpt["ema"])
         (optimizer.load_state_dict(ckpt["opt"]),)
+        (optimizer_vae.load_state_dict(ckpt["opt_vae"]),)
         global_step = ckpt["steps"]
 
     # Allow larger cache size for DYNAMo compilation
@@ -322,13 +323,23 @@ def main(args):
         model, vae, optimizer, train_dataloader
     )
 
+    vae_copy = copy.deepcopy(accelerator.unwrap_model(vae))
+    vae_copy.requires_grad_(False)
+    vae_copy.eval()
+
     if accelerator.is_main_process:
         tracker_config = vars(copy.deepcopy(args))
-        accelerator.init_trackers(
-            project_name="diffusion vae arena",
-            config=tracker_config,
-            init_kwargs={"wandb": {"name": f"{args.exp_name}"}},
-        )
+        if Hub is None:
+            accelerator.init_trackers(
+                project_name="diffusion vae arena",
+                config=tracker_config,
+                init_kwargs={"wandb": {"name": f"{args.exp_name}"}},
+            )
+        else:
+            hub=Hub()
+            hub_project = hub.project('ispalgo_us')
+            hub_exp = hub_project.experiments_api.experiment('tongda_xu_dev')
+            hub_run = hub_exp.start_run(name=args.exp_name + "-" + datetime.now().strftime("%Y-%m-%d_%H-%M-%S"), enable_async=False)
 
     progress_bar = tqdm(
         range(0, args.max_train_steps),
@@ -336,6 +347,13 @@ def main(args):
         desc="Steps",
         # Only show the progress bar once on each machine.
         disable=not accelerator.is_local_main_process,
+    )
+    requires_grad(vae, True)
+
+    loss_kwargs = dict(
+        path_type=args.path_type,
+        prediction=args.prediction,
+        weighting=args.weighting,
     )
 
     for epoch in range(args.epochs):
@@ -345,56 +363,95 @@ def main(args):
             raw_image = raw_image.to(device)
             labels = y.to(device)
 
+            with torch.no_grad():
+                zs = []
+                with accelerator.autocast():
+                    for encoder, encoder_type, arch in zip(encoders, encoder_types, architectures):
+                        raw_image_ = preprocess_raw_image(raw_image, encoder_type)
+                        z = encoder.forward_features(raw_image_)
+                        if 'mocov3' in encoder_type: z = z = z[:, 1:] 
+                        if 'dinov2' in encoder_type: z = z['x_norm_patchtokens']
+                        zs.append(z)
+
+            vae.train()
             model.train()
-            requires_grad(model, True)
 
             with accelerator.autocast():
                 # 1). Forward pass: VAE
                 processed_image = preprocess_imgs_vae(raw_image)
 
-                vae.eval()
-                with torch.no_grad():
-                    z = vae.encode(processed_image)
-                    z_teacher = vae_teacher.encode(processed_image)
+                z, info = vae(processed_image)
+                recon_image, posterior = info["xhat"], info["posterior"]
+
                 # 2). Backward pass: VAE, compute the VAE loss, backpropagate, and update the VAE; Then, compute the riminator loss and update the discriminator
                 #    loss_kwargs used for SiT forward function, create here and can be reused for both VAE and SiT
-                loss_kwargs = dict(
-                    path_type=args.path_type,
-                    prediction=args.prediction,
-                    weighting=args.weighting,
-                )
                 # Record the time_input and noises for the VAE alignment, so that we avoid sampling again
                 time_input = None
                 noises = None
 
-                # 3). Forward pass: SiT
-                # **Avoid diffusion loss to backpropagate to the VAE, so we detach the `z`**
-                loss_kwargs["weighting"] = args.weighting
-                sit_outputs = model(
+                # Turn off grads for the SiT model (avoid REPA gradient on the SiT model)
+                requires_grad(model, False)
+                model.eval()
+
+                vae_loss, vae_loss_dict = vae_loss_fn(processed_image, recon_image, posterior, global_step, "generator")
+                vae_loss = vae_loss.mean()
+
+                # Compute the REPA alignment loss for VAE updates
+                loss_kwargs["align_only"] = False
+                vae_align_outputs = model(
                     x=z,
                     y=labels,
+                    zs=zs,
                     loss_kwargs=loss_kwargs,
                     time_input=time_input,
                     noises=noises,
                 )
 
-                with torch.no_grad():
-                    sit_outputs_teacher = model_teacher(
-                        x=z_teacher,
-                        y=labels,
-                        loss_kwargs=loss_kwargs,
-                        time_input=sit_outputs["time_input"],
-                        noises=sit_outputs["noises"],
-                    )
-                zs = sit_outputs["zs"].reshape(z_teacher.shape[0], -1)
-                zs_teacher = sit_outputs_teacher["zs"].reshape(z_teacher.shape[0], -1)
+                vae_loss = vae_loss + args.vae_align_proj_coeff * vae_align_outputs["proj_loss"].mean()
 
-                zs = F.normalize(zs, dim=-1)
-                zs_teacher = F.normalize(zs_teacher, dim=-1)
-                align_loss = torch.mean(-torch.sum(zs * zs_teacher, dim=-1))
-                sit_loss = sit_outputs["denoising_loss"].mean()
-                loss = sit_loss + align_loss * args.align_loss_lambda
-                accelerator.backward(loss)
+                if args.ploss:
+                    pred_x_vae = accelerator.unwrap_model(vae_copy).decode(vae_align_outputs["pred_x"])
+                    ploss_vae = loss_fn_vgg(pred_x_vae, processed_image)
+                    vae_loss += ploss_vae.mean() * args.vae_ploss_coeff
+
+                # Save the `time_input` and `noises` and reuse them for the SiT model forward pass
+                time_input = vae_align_outputs["time_input"]
+                noises = vae_align_outputs["noises"]
+
+                accelerator.backward(vae_loss)
+                if accelerator.sync_gradients:
+                    grad_norm_vae = accelerator.clip_grad_norm_(vae.parameters(), args.max_grad_norm)
+                optimizer_vae.step()
+                optimizer_vae.zero_grad(set_to_none=True)
+
+                vae_copy.load_state_dict(
+                    accelerator.unwrap_model(vae).state_dict()
+                )
+                # 3). Forward pass: SiT
+                # **Avoid diffusion loss to backpropagate to the VAE, so we detach the `z`**
+                requires_grad(model, True)
+                model.train()
+
+                loss_kwargs["align_only"] = False
+                sit_outputs = model(
+                    x=z.detach(),
+                    y=labels,
+                    zs=zs,
+                    loss_kwargs=loss_kwargs,
+                    time_input=time_input,
+                    noises=noises,
+                )
+
+                sit_loss = sit_outputs["denoising_loss"].mean() + args.proj_coeff * sit_outputs["proj_loss"].mean()
+
+                if args.ploss:
+                    pred_x = accelerator.unwrap_model(vae).decode(sit_outputs["pred_x"])
+                    ploss = loss_fn_vgg(pred_x, processed_image).mean()
+                    sit_loss += ploss
+                else:
+                    ploss = None
+
+                accelerator.backward(sit_loss)
 
                 if accelerator.sync_gradients:
                     grad_norm_sit = accelerator.clip_grad_norm_(
@@ -403,6 +460,8 @@ def main(args):
 
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
+
+                psnr = torch.mean(get_psnr(processed_image, recon_image, zero_mean=True, integer=True))
 
                 # 5). Update SiT EMA
                 if accelerator.sync_gradients:
@@ -420,7 +479,6 @@ def main(args):
                 # Prepare the logs based on the current step
                 logs = {
                     "sit_loss": accelerator.gather(sit_loss).mean().detach().item(),
-                    "align_loss": accelerator.gather(align_loss).mean().detach().item(),
                     "denoising_loss": accelerator.gather(sit_outputs["denoising_loss"])
                     .mean()
                     .detach()
@@ -430,15 +488,31 @@ def main(args):
                     .detach()
                     .item(),
                     "epoch": epoch,
+                    "psnr": accelerator.gather(psnr).mean().detach().item(),
+                    "vae_loss": accelerator.gather(vae_loss).mean().detach().item(),
+                    "reconstruction_loss": accelerator.gather(vae_loss_dict["reconstruction_loss"].mean()).mean().detach().item(),
+                    "perceptual_loss": accelerator.gather(vae_loss_dict["perceptual_loss"].mean()).mean().detach().item(),
+                    "kl_loss": accelerator.gather(vae_loss_dict["kl_loss"].mean()).mean().detach().item(),
+                    "vae_align_loss": accelerator.gather(vae_align_outputs["proj_loss"].mean()).mean().detach().item(),
+                    "proj_loss": accelerator.gather(sit_outputs["proj_loss"]).mean().detach().item(),
+                    "grad_norm_vae": accelerator.gather(grad_norm_vae).mean().detach().item(),
                 }
 
+                if ploss is not None:
+                    logs["ploss"] = accelerator.gather(ploss).mean().detach().item()
+
                 progress_bar.set_postfix(**logs)
-                accelerator.log(logs, step=global_step)
+                if Hub is None:
+                    accelerator.log(logs, step=global_step)
+                else:
+                    if accelerator.is_main_process:
+                        hub_run.log_metrics(logs, step=global_step)
 
             if global_step % args.checkpointing_steps == 0 and global_step > 0:
                 if accelerator.is_main_process:
                     # `model` and `vae` are wrapped by the `accelerator` object, so we need to unwrap them
                     unwrapped_model = accelerator.unwrap_model(model)
+                    unwrapped_vae = accelerator.unwrap_model(vae)
 
                     # model might be compiled, we extract the original model
                     original_model = (
@@ -446,8 +520,10 @@ def main(args):
                     )
                     checkpoint = {
                         "model": original_model.state_dict(),
+                        "vae": unwrapped_vae.state_dict(),
                         "ema": ema.state_dict(),
                         "opt": optimizer.state_dict(),
+                        "opt_vae": optimizer_vae.state_dict(),
                         "args": args,
                         "steps": global_step,
                     }
@@ -474,27 +550,22 @@ def main(args):
                         path_type=args.path_type,
                         heun=False,
                     ).to(torch.float32)
-                    latents_stats = unwrapped_model.extract_latents_stats()
-                    if len(samples.shape) == 4:
-                        latents_scale = latents_stats["latents_scale"].view(
-                            1, in_channels, 1, 1
-                        )
-                        latents_bias = latents_stats["latents_bias"].view(
-                            1, in_channels, 1, 1
-                        )
-                    else:
-                        latents_scale = latents_stats["latents_scale"].view(
-                            1, 1, in_channels
-                        )
-                        latents_bias = latents_stats["latents_bias"].view(
-                            1, 1, in_channels
-                        )
+                    samples = unwrapped_model.denormalize_latents(samples)
                     samples = accelerator.unwrap_model(vae).decode(
-                        denormalize_latents(samples, latents_scale, latents_bias)
+                        samples
                     )
                     samples = (samples + 1) / 2.0
                 out_samples = accelerator.gather(samples.to(torch.float32))
-                accelerator.log({"samples": wandb.Image(array2grid(out_samples))})
+
+                if Hub is None:
+                    accelerator.log({"samples": wandb.Image(array2grid(out_samples))})
+                else:
+                    if accelerator.is_main_process:
+                        img = Image.fromarray(array2grid(out_samples))
+                        img_path = os.path.join(args.output_dir, f"sample_{global_step:07d}.png")
+                        img.save(img_path)
+                        hub_run.log_artifact('samples', img_path, step=global_step)
+
                 logging.info("Generating EMA samples done.")
 
             if global_step >= args.max_train_steps:
@@ -557,8 +628,18 @@ def parse_args(input_args=None):
     )
 
     parser.add_argument(
+        "--ploss", action=argparse.BooleanOptionalAction, default=False
+    )
+
+    parser.add_argument(
         "--mixed-precision", type=str, default="fp16", choices=["no", "fp16", "bf16"]
     )
+
+    # alignment
+    parser.add_argument("--enc-type", type=str, default='dinov2-vit-l')
+    parser.add_argument("--vae-align-proj-coeff", type=float, default=1.5)
+    parser.add_argument("--vae-ploss-coeff", type=float, default=1.0)
+    parser.add_argument("--proj-coeff", type=float, default=0.5)
 
     # optimization params
     parser.add_argument("--epochs", type=int, default=1400)
@@ -598,7 +679,7 @@ def parse_args(input_args=None):
     parser.add_argument("--seed", type=int, default=0)
 
     # cpu params
-    parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument("--num-workers", type=int, default=16)
 
     # loss params
     parser.add_argument(
@@ -611,6 +692,13 @@ def parse_args(input_args=None):
         choices=["v"],
         help="currently we only support v-prediction",
     )
+    parser.add_argument(
+        "--prediction-internal",
+        type=str,
+        default="v",
+        choices=["v", "x"],
+        help="internal prediction type, could be x or v, only used for loss computation and does not affect the model architecture",
+    )
     parser.add_argument("--cfg-prob", type=float, default=0.1)
     parser.add_argument(
         "--weighting",
@@ -619,11 +707,14 @@ def parse_args(input_args=None):
         choices=["uniform", "lognormal"],
         help="Loss weihgting, uniform or lognormal",
     )
+    parser.add_argument("--loss-cfg-path", type=str, default="./configs/l1_lpips_kl.yaml")
 
     # vae params
     parser.add_argument("--vae-config", type=str, default="")
-    parser.add_argument("--vae-teacher-config", type=str, default="")
-    parser.add_argument("--align-loss-lambda", type=float, default=1.0)
+    parser.add_argument("--token-drop", type=int, default=-1)
+    parser.add_argument("--token-drop-mode", type=str, default="drop")
+    parser.add_argument("--token-drop-param", type=float, default=1.0)
+    parser.add_argument("--token-drop-dim", type=int, default=1)
 
     if input_args is not None:
         args = parser.parse_args(input_args)

@@ -1,0 +1,4 @@
+target: ifid.vae.pixel.PIXELVAEPCA
+params:
+  flow_ckpt_path: ./pixpca-uneven-lpips-10k-400k/checkpoints/0050000.pt
+  debug: 32

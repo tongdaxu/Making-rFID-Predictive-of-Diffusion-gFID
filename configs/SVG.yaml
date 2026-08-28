@@ -1,6 +1,6 @@
 target: ifid.vae.svg.SVGEXPORT
 params:
-  ckpt_path: /share/xutongda/hfhome/hub/SVG/autoencoder/svg_autoencoder_dinov3s16p_vit-s_epoch40.ckpt
+  ckpt_path: svg_autoencoder_dinov3s16p_vit-s_epoch40.ckpt
   embed_dim: 32
   ddconfig:
     double_z: true
@@ -15,9 +15,9 @@ params:
     - 16
     dropout: 0.0
   dinoconfig:
-    dinov3_location: /video_ssd/kongzishang/xutongda/git/dinov3
+    dinov3_location: dinov3
     model_name: dinov3_vits16plus
-    weights: /video_ssd/kongzishang/xutongda/git/dinov3/dinov3_vits16plus_pretrain_lvd1689m-4057cbaa.pth
+    weights: dinov3/dinov3_vits16plus_pretrain_lvd1689m-4057cbaa.pth
   extra_vit_config:
     output_dim: 8
     mask_ratio: 0.1

@@ -679,7 +679,7 @@ class DETOKEXPORT(nn.Module):
         }
 
         self.model = detok_BB(**model_params).eval()
-        weights = torch.load(ckpt_path, weights_only=False, map_location="cpu")
+        weights = torch.load(ckpt_path, map_location="cpu", weights_only=True)
         weights = weights["model"] if "model" in weights else weights
         missing_keys, unexpected_keys = self.model.load_state_dict(weights, strict=True)
         self.model.eval()

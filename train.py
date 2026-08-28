@@ -25,11 +25,6 @@ from PIL import Image
 from accelerate.utils import DistributedDataParallelKwargs
 import lpips
 
-try:
-    from turihub import Hub
-except:
-    Hub = None
-
 logger = get_logger(__name__)
 
 
@@ -211,6 +206,10 @@ def main(args):
         bn_momentum=args.bn_momentum,
         tshift=tshift,
         prediction_internal=args.prediction_internal,
+        tk_drop=args.token_drop,
+        tk_drop_mode=args.token_drop_mode,
+        tk_drop_param=args.token_drop_param,
+        tk_drop_dim=args.token_drop_dim,
         **block_kwargs,
     )
 
@@ -287,17 +286,11 @@ def main(args):
 
     if accelerator.is_main_process:
         tracker_config = vars(copy.deepcopy(args))
-        if Hub is None:
-            accelerator.init_trackers(
-                project_name="diffusion vae arena",
-                config=tracker_config,
-                init_kwargs={"wandb": {"name": f"{args.exp_name}"}},
-            )
-        else:
-            hub=Hub()
-            hub_project = hub.project('ispalgo_us')
-            hub_exp = hub_project.experiments_api.experiment('tongda_xu_dev')
-            hub_run = hub_exp.start_run(name=args.exp_name + "-" + datetime.now().strftime("%Y-%m-%d_%H-%M-%S"), enable_async=False)
+        accelerator.init_trackers(
+            project_name="diffusion vae arena",
+            config=tracker_config,
+            init_kwargs={"wandb": {"name": f"{args.exp_name}"}},
+        )
 
     progress_bar = tqdm(
         range(0, args.max_train_steps),
@@ -366,7 +359,7 @@ def main(args):
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
 
-                psnr = torch.mean(get_psnr(processed_image, xhat, zero_mean=True))
+                psnr = torch.mean(get_psnr(processed_image, xhat, zero_mean=True, integer=True))
 
                 # 5). Update SiT EMA
                 if accelerator.sync_gradients:
@@ -400,11 +393,7 @@ def main(args):
                     logs["ploss"] = accelerator.gather(ploss).mean().detach().item()
 
                 progress_bar.set_postfix(**logs)
-                if Hub is None:
-                    accelerator.log(logs, step=global_step)
-                else:
-                    if accelerator.is_main_process:
-                        hub_run.log_metrics(logs, step=global_step)
+                accelerator.log(logs, step=global_step)
 
             if global_step % args.checkpointing_steps == 0 and global_step > 0:
                 if accelerator.is_main_process:
@@ -452,14 +441,7 @@ def main(args):
                     samples = (samples + 1) / 2.0
                 out_samples = accelerator.gather(samples.to(torch.float32))
 
-                if Hub is None:
-                    accelerator.log({"samples": wandb.Image(array2grid(out_samples))})
-                else:
-                    if accelerator.is_main_process:
-                        img = Image.fromarray(array2grid(out_samples))
-                        img_path = os.path.join(args.output_dir, f"sample_{global_step:07d}.png")
-                        img.save(img_path)
-                        hub_run.log_artifact('samples', img_path, step=global_step)
+                accelerator.log({"samples": wandb.Image(array2grid(out_samples))})
 
                 logging.info("Generating EMA samples done.")
 
@@ -599,6 +581,10 @@ def parse_args(input_args=None):
 
     # vae params
     parser.add_argument("--vae-config", type=str, default="")
+    parser.add_argument("--token-drop", type=int, default=-1)
+    parser.add_argument("--token-drop-mode", type=str, default="drop")
+    parser.add_argument("--token-drop-param", type=float, default=1.0)
+    parser.add_argument("--token-drop-dim", type=int, default=1)
 
     if input_args is not None:
         args = parser.parse_args(input_args)

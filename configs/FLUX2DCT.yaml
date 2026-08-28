@@ -1,0 +1,5 @@
+target: ifid.vae.flux2vae.Flux2VAEDCT
+params:
+  ckpt_path: Comfy-Org/flux2-dev/split_files/vae/flux2-vae.safetensors
+  resolution: 256
+  strict: true

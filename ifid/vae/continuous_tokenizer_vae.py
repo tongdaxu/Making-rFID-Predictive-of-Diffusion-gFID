@@ -44,7 +44,7 @@ class ContinuousTokenizerVAE(nn.Module):
 
         self.model = FlowModel(config=modelargs)
 
-        flow_ckpt = torch.load(ckpt_file, map_location="cpu")["model"]
+        flow_ckpt = torch.load(ckpt_file, map_location="cpu", weights_only=False)["model"]
         missing, unexpected = self.model.load_state_dict(flow_ckpt, strict=False)
         print("missing", missing)
         print("unexp", unexpected)

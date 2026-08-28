@@ -520,7 +520,7 @@ class SimMIMVAE(nn.Module):
         )
         self.model = SimMIM(encoder=encoder, encoder_stride=encoder_stride)
 
-        checkpoint = torch.load(ckpt_file, map_location="cpu")
+        checkpoint = torch.load(ckpt_file, map_location="cpu", weights_only=False)
         if not isinstance(checkpoint, dict) or "model" not in checkpoint:
             raise KeyError(
                 f"Expected checkpoint['model'], but got keys: "

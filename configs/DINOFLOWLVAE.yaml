@@ -1,0 +1,4 @@
+target: ifid.vae.dino.DINOFlowVAE
+params:
+  ckpt_path: ./checkpoints/0100000.pt
+  size: large

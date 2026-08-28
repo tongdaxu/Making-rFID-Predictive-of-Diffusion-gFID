@@ -2,4 +2,5 @@ target: ifid.vae.klvae.KLVAE
 params:
   embed_dim: 4
   ch_mult: [1, 2, 4, 4]
+  use_pre_post: True
   ckpt_path: REPA-E/sdvae/sdvae-f8d4.pt

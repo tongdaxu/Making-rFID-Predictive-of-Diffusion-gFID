@@ -1,0 +1,16 @@
+model:
+    vq_model:
+        quantize_mode: vae
+
+losses:
+    discriminator_start: 0
+    discriminator_factor: 0.0
+    discriminator_weight: 0.0
+    quantizer_weight: 1.0
+    perceptual_loss: "lpips"
+    perceptual_weight: 0.5
+    reconstruction_loss: "l1"
+    reconstruction_weight: 1.0
+    lecam_regularization_weight: 0.0
+    kl_weight: 2e-7
+    logvar_init: 0.0

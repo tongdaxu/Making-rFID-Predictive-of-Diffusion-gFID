@@ -8,6 +8,7 @@ setup(
         "ifid.sit",
         "ifid.unet",
         "ifid.fid",
+        "ifid.t2i",
         "ifid.vae",
         "ifid.vae.dinov3",
         "ifid.vae.dinov3.layers",
@@ -29,5 +30,6 @@ setup(
         "ifid.vae.rae_module",
         "ifid.vae.rae_module.encoders",
         "ifid.vae.rae_module.decoders",
+        "ifid.loss",
     ],
 )

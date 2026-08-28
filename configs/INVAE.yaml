@@ -1,5 +1,6 @@
 target: ifid.vae.klvae.KLVAE
 params:
   embed_dim: 32
-  ch_mult: [1, 1, 2, 2, 4, 4]
+  ch_mult: [1, 1, 2, 2, 4]
+  use_pre_post: True
   ckpt_path: REPA-E/invae/invae-f16d32.pt

@@ -6,8 +6,9 @@ import numpy as np
 
 from huggingface_hub import snapshot_download
 from safetensors.torch import load
-
+from ifid.vae.autoencoder import Encoder, Decoder, DiagonalGaussianDistribution
 from ifid.vae.vtp_module.vtp_hf import VTPConfig, VTPModel
+import torch.nn.functional as F
 
 class VTPVAE(nn.Module):
     def __init__(self, ckpt_folder):
@@ -42,6 +43,98 @@ class VTPVAE(nn.Module):
         z = self.encode(x)
         xhat = self.decode(z)
         return x, {"xhat": xhat}
+
+class VTPResVAE(nn.Module):
+    def __init__(self, vtp_ckpt, use_mse_decoder=False, ckpt_path=None):
+        super().__init__()
+        self.foundation_model = VTPVAE(vtp_ckpt)
+        self.vf_feature_dim = 64
+        self.encoder = Encoder(
+            z_channels=self.vf_feature_dim,
+            double_z=True,
+            ch_mult=[1,2,4,8,8],
+            num_res_blocks=2,
+            attn_resolutions=[],
+            mid_attn=False,
+        )
+        self.decoder = Decoder(
+            z_channels=self.vf_feature_dim,
+            ch_mult=[1,2,4,8,8],
+            num_res_blocks=2,
+            attn_resolutions=[],
+            mid_attn=False,
+        )
+        self.use_mse_decoder = use_mse_decoder
+        if self.use_mse_decoder:
+            self.decoder_vtp = Decoder(
+                z_channels=self.vf_feature_dim,
+                resolution=256,
+                in_channels=3,
+                out_ch=3,
+                ch=128,
+                ch_mult=[1, 2, 4, 8, 8],
+                num_res_blocks=2,
+                attn_resolutions=[],
+                mid_attn=False,
+            )
+        if ckpt_path is not None:
+            miss_keys, unexp_keys = self.load_state_dict(torch.load(ckpt_path, map_location='cpu')["state_dict"], strict=False)
+            print("missing: ", miss_keys)
+            print("unexp_keys: ", unexp_keys)
+
+    def encode(self, x):
+        aux_z = self.foundation_model.encode(x)
+        if self.use_mse_decoder:
+            aux_x = self.decoder_vtp(aux_z)
+        else:
+            aux_x = self.foundation_model.decode(aux_z)
+        res_x = x - aux_x
+        res_z = DiagonalGaussianDistribution(self.encoder(res_x)).sample()
+        return torch.cat([aux_z, res_z], dim=1)
+
+    def decode(self, z):
+        aux_z, res_z = z[:, :self.vf_feature_dim], z[:, self.vf_feature_dim:]
+        res_x_hat = self.decoder(res_z)
+        if self.use_mse_decoder:
+            aux_x = self.decoder_vtp(aux_z)
+        else:
+            aux_x = self.foundation_model.decode(aux_z)
+        return aux_x + res_x_hat
+
+    def forward(self, x):
+        z = self.encode(x)
+        xhat = self.decode(z)
+        return x, {"xhat": xhat}
+
+class VTPRes(nn.Module):
+    def __init__(self, vtp_ckpt):
+        super().__init__()
+        self.foundation_model = VTPVAE(vtp_ckpt)
+        self.downrate = 16
+        self.embed_dim = 64
+
+    def encode(self, x):
+        aux_z = self.foundation_model.encode(x)
+        if self.use_mse_decoder:
+            aux_x = self.decoder_vtp(aux_z)
+        else:
+            aux_x = self.foundation_model.decode(aux_z)
+        res_x = x - aux_x
+        res_z = F.pixel_unshuffle(res_x, self.downrate)
+        return torch.cat([aux_z, res_z], dim=1)
+
+    def decode(self, z):
+        aux_z, res_z = z[:, :self.embed_dim], z[:, self.embed_dim:]
+        res_x = F.pixel_shuffle(res_z, self.downrate)
+        aux_x = self.foundation_model.decode(aux_z)
+        x = aux_x + res_x
+        return x
+
+    def forward(self, x):
+        z = self.encode(x)
+        xhat = self.decode(z)
+        return x, {"xhat": xhat}
+
 
 if __name__ == "__main__":
     from omegaconf import OmegaConf

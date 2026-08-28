@@ -1,6 +1,6 @@
 target: ifid.vae.transformer_flow_vae.TransformerFlowVAE
 params:
-  ckpt_file: /video_ssd/kongzishang/xutongda/git/ml-tarflow/runs/imagenet256-cond/imagenet_model_8_768_8_8_0.05.pth
+  ckpt_file: ./checkpoints/ckpt.ckpt
   img_size: 256
   channel_size: 3
   patch_size: 8

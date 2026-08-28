@@ -1,0 +1,3 @@
+target: ifid.vae.dino.DINOFlowVAEFastInv
+params:
+  ckpt_path: ./checkpoints/0100000.pt

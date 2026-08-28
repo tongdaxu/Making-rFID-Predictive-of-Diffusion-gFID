@@ -514,9 +514,15 @@ class DMVAE(nn.Module):
         except:
             ckpt = torch.load(state_dict_path, map_location="cpu", weights_only=False)
         if ema and "vae_ema" in ckpt:
-            self.load_state_dict(ckpt["vae_ema"], strict=True)
+            try:
+                self.load_state_dict(ckpt["vae_ema"], strict=True)
+            except:
+                self.load_state_dict(ckpt["vae_ema"], strict=True, weights_only=False)
         else:
-            self.load_state_dict(ckpt["vae_wo_ddp"], strict=True)
+            try:
+                self.load_state_dict(ckpt["vae_wo_ddp"], strict=True)
+            except:
+                self.load_state_dict(ckpt["vae_wo_ddp"], strict=True, weights_only=False)
 
 
 class DMVAEEXPORT(nn.Module):

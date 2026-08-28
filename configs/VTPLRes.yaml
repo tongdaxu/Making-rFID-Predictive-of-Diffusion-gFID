@@ -1,0 +1,3 @@
+target: ifid.vae.vtp.VTPRes
+params:
+  vtp_ckpt: MiniMaxAI/VTP-Large-f16d64

@@ -1,0 +1,7 @@
+target: ifid.vae.flux2vae.FLUX2VAEPCA
+params:
+  ckpt_path: Comfy-Org/flux2-dev/split_files/vae/flux2-vae.safetensors
+  resolution: 256
+  strict: true
+  flow_ckpt_path: ./checkpoints/0100000.pt
+  debug: 32

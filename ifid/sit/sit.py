@@ -249,6 +249,10 @@ class SiT(nn.Module):
         tk_drop=-1,
         tk_drop_mode="drop",
         tk_drop_param=1,
+        tk_drop_dim=1,
+        tm_dim=-1,
+        tm_schedule=(1,),
+        z_dims=[1024],
         **block_kwargs,  # fused_attn
     ):
         super().__init__()
@@ -315,6 +319,15 @@ class SiT(nn.Module):
         self.encoder_depth = 8
         self.t_eps = 4e-2
         self.p = tk_drop_param
+        self.tk_drop_dim = tk_drop_dim
+        self.tm_dim = tm_dim
+        self.tm_schedule = tm_schedule
+
+        projector_dim=2048
+        if z_dims is not None:
+            self.projectors = nn.ModuleList([
+                build_mlp(hidden_size, projector_dim, z_dim) for z_dim in z_dims
+            ])
 
     def shift_time(self, t):
         shifted_t = self.tshift * t / (1 + (self.tshift - 1) * t)
@@ -324,20 +337,29 @@ class SiT(nn.Module):
         bs = z.shape[0]
         if self.vae_1d:
             normalized_z = self.bn(z.transpose(1, 2)).transpose(1, 2)
-            if self.tk_drop > 0:
-                if self.tk_drop_mode == "drop":
-                    prob = torch.ones(bs, 1, 1).to(device=z.device, dtype=z.dtype) * self.p
-                    normalized_z[:, :, self.tk_drop:] = normalized_z[:, :, self.tk_drop:] * torch.bernoulli(prob)
-                elif self.tk_drop_mode == "scale":
-                    normalized_z[:, :, self.tk_drop:] = normalized_z[:, :, self.tk_drop:] * self.p
         else:
             normalized_z = self.bn(z)
-            if self.tk_drop > 0:
-                if self.tk_drop_mode == "drop":
+
+        if self.tk_drop > 0:
+            if self.tk_drop_mode == "drop":
+                if self.vae_1d:
+                    prob = torch.ones(bs, 1, 1).to(device=z.device, dtype=z.dtype) * self.p
+                else:
                     prob = torch.ones(bs, 1, 1, 1).to(device=z.device, dtype=z.dtype) * self.p
-                    normalized_z[:, self.tk_drop:, :, :] = normalized_z[:, self.tk_drop:, :, :] * torch.bernoulli(prob)
-                elif self.tk_drop_mode == "scale":
-                    normalized_z[:, self.tk_drop:, :, :] = normalized_z[:, self.tk_drop:, :, :] * self.p
+                if self.tk_drop_dim == 1:
+                    normalized_z[:, self.tk_drop:] = normalized_z[:, self.tk_drop:] * torch.bernoulli(prob)
+                elif self.tk_drop_dim == 2:
+                    normalized_z[:, :, self.tk_drop:] = normalized_z[:, :, self.tk_drop:] * torch.bernoulli(prob)
+                else:
+                    raise ValueError
+            elif self.tk_drop_mode == "scale":
+                if self.tk_drop_dim == 1:
+                    normalized_z[:, self.tk_drop:] = normalized_z[:, self.tk_drop:] * self.p
+                elif self.tk_drop_dim == 2:
+                    normalized_z[:, :, self.tk_drop:] = normalized_z[:, :, self.tk_drop:] * self.p
+                else:
+                    raise ValueError
+        
         return normalized_z
 
     def denormalize_latents(self, z):
@@ -475,7 +497,9 @@ class SiT(nn.Module):
         loss_kwargs,
         time_input=None,
         noises=None,
-        align_only=False,
+        zs=None, # alignment
+        return_feat=False,
+        **kwargs,
     ):
         """
         Forward pass of SiT, integrating the loss function computation
@@ -545,13 +569,18 @@ class SiT(nn.Module):
         t_embed = self.t_embedder(time_input.flatten())  # (N, D)
         y = self.y_embedder(y, self.training)  # (N, D)
         c = t_embed + y  # (N, D)
-        zs = []
+        zs_tilde, fs_tilde = [], []
         for i, block in enumerate(self.blocks):
             # checkpoint
             # x = torch.utils.checkpoint.checkpoint(block, x, c, use_reentrant=False)
             x = block(x, c)  # (N, T, D)
-            if (i + 1) == self.encoder_depth:
-                zs.append(x)
+            if return_feat is True and (i + 1) == self.encoder_depth:
+                fs_tilde = [x.reshape(-1, T, D)]
+            if (zs is not None) and (i + 1) == self.encoder_depth:
+                zs_tilde = [projector(x.reshape(-1, D)).reshape(N, T, -1) for projector in self.projectors]
+                # NOTE: add a shortcut for feature extraction
+            if (i+1) == self.encoder_depth and loss_kwargs.get("align_only", False):
+                break
 
         x = self.final_layer(x, c)  # (N, T, patch_size ** 2 * out_channels)
         if not self.vae_1d:
@@ -567,14 +596,6 @@ class SiT(nn.Module):
             raise NotImplementedError()
             # from x prediction to v prediction:
 
-        # loss computation
-
-        # if self.tk_drop > 0:
-        #     prob = torch.ones(N, 1, 1, 1).to(device=x.device, dtype=x.dtype) * self.p
-        #     sampling_mask = torch.bernoulli(prob)
-        #     x[:, self.tk_drop:, :, :] = x[:, self.tk_drop:, :, :] * sampling_mask
-        #     model_target[:, self.tk_drop:, :, :] = model_target[:, self.tk_drop:, :, :] * sampling_mask
-
         denoising_loss = mean_flat((x - model_target) ** 2)
 
         if not self.vae_1d:
@@ -586,19 +607,38 @@ class SiT(nn.Module):
 
         pred_x = pred_x_normalized * std_x + mean_x
 
+        proj_loss = torch.tensor(0., device=x.device)
+        proj_losses = []
+
+        if zs is not None:
+            bsz = zs[0].shape[0]
+            for i, (z, z_tilde) in enumerate(zip(zs, zs_tilde)):
+                proj_loss_local = torch.tensor(0., device=x.device)
+                for z_j, z_tilde_j in zip(z, z_tilde):
+                    z_tilde_j = torch.nn.functional.normalize(z_tilde_j, dim=-1) 
+                    z_j = torch.nn.functional.normalize(z_j, dim=-1) 
+                    proj_loss_i = mean_flat(-(z_j * z_tilde_j).sum(dim=-1))
+                    proj_loss_local += proj_loss_i
+                    proj_loss += proj_loss_i
+                proj_losses.append(proj_loss_local / bsz)
+            proj_loss /= (len(zs) * bsz)
+
         ret_dict = {
             "pred_x": pred_x,
             "model_output": x,
             "denoising_loss": denoising_loss,
             "time_input": time_input,
             "noises": noises,
-            "zs": zs,
+            "zs_tilde": zs_tilde,
+            "fs_tilde": fs_tilde,
+            "proj_loss": proj_loss,
+            "proj_losses": proj_losses,
         }
 
         return ret_dict
 
     @torch.no_grad()
-    def inference(self, x, t, y):
+    def inference(self, x, t, y, **kwargs):
         zt = x.clone()
         x = (
             self.x_embedder(x) + self.pos_embed
@@ -615,12 +655,15 @@ class SiT(nn.Module):
         if not self.vae_1d:
             x = self.unpatchify(x)  # (N, out_channels, H, W)
         if self.prediction_internal == "x":
-            x = (zt - x) / t[:,None,None,None]
+            if not self.vae_1d:
+                x = (zt - x) / t[:,None,None,None]
+            else:
+                x = (zt - x) / t[:,None,None]
         elif self.prediction_internal == "v" or self.prediction_internal is None:
             x = x
         else:
             raise NotImplementedError()
-
+        
         return x
 
     @torch.no_grad()
@@ -642,6 +685,463 @@ class SiT(nn.Module):
 
         return None
 
+from ifid.sit.ddt import ConditionEmbedder
+from ifid.sit.mmdit import MMDiTBlock
+
+class SiTT2I(nn.Module):
+    """
+    Diffusion model with a Transformer backbone.
+    """
+
+    def __init__(
+        self,
+        path_type="edm",
+        input_size=32,
+        patch_size=2,
+        in_channels=4,
+        hidden_size=1152,
+        decoder_hidden_size=768,
+        depth=28,
+        num_heads=16,
+        mlp_ratio=4.0,
+        num_classes=1000,
+        bn_momentum=0.1,
+        vae_1d=False,
+        tshift=1.0,
+        prediction_internal="v",
+        tk_drop=-1,
+        tk_drop_mode="drop",
+        tk_drop_param=1,
+        tk_drop_dim=1,
+        tm_dim=-1,
+        tm_schedule=(1,),
+        z_dims=[1024],
+        **block_kwargs,  # fused_attn
+    ):
+        super().__init__()
+        self.path_type = path_type
+        self.in_channels = in_channels
+        self.out_channels = in_channels
+        self.patch_size = patch_size
+        self.num_heads = num_heads
+        self.num_classes = num_classes
+        self.vae_1d = vae_1d
+        self.prediction_internal = prediction_internal
+        self.tk_drop = tk_drop
+        self.tk_drop_mode = tk_drop_mode
+
+        if self.vae_1d:
+            self.x_embedder = nn.Linear(in_channels, hidden_size)
+            num_patches = input_size
+            assert self.patch_size == 1
+        else:
+            self.x_embedder = PatchEmbed(
+                input_size, patch_size, in_channels, hidden_size, bias=True
+            )
+            num_patches = self.x_embedder.num_patches
+
+        self.t_embedder = TimestepEmbedder(hidden_size)  # timestep embedding type
+        self.y_embedder = ConditionEmbedder(num_classes=num_classes, hidden_size=hidden_size, condition_type="text", n_tokens=8, context_dim=1024)
+
+        # Will use fixed sin-cos embedding:
+        self.pos_embed = nn.Parameter(
+            torch.zeros(1, num_patches, hidden_size), requires_grad=False
+        )
+
+        self.blocks = nn.ModuleList(
+            [
+                MMDiTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio, **block_kwargs)
+                for _ in range(depth)
+            ]
+        )
+
+        self.final_layer = FinalLayer(
+            decoder_hidden_size, patch_size, self.out_channels
+        )
+        # Note that we disable affine parameters in the batch norm layer, to avoid affine hacking diffusion loss
+
+        if self.vae_1d:
+            self.bn = torch.nn.BatchNorm1d(
+                in_channels,
+                eps=1e-4,
+                momentum=bn_momentum,
+                affine=False,
+                track_running_stats=True,
+            )
+        else:
+            self.bn = torch.nn.BatchNorm2d(
+                in_channels,
+                eps=1e-4,
+                momentum=bn_momentum,
+                affine=False,
+                track_running_stats=True,
+            )
+
+        self.tshift = tshift
+        self.bn.reset_running_stats()
+        self.initialize_weights()
+        self.encoder_depth = 8
+        if self.prediction_internal == "x":
+            self.t_eps = 4e-2
+        else:
+            self.t_eps = 0
+        self.p = tk_drop_param
+        self.tk_drop_dim = tk_drop_dim
+        self.tm_dim = tm_dim
+        self.tm_schedule = tm_schedule
+
+        projector_dim=2048
+        if z_dims is not None:
+            self.projectors = nn.ModuleList([
+                build_mlp(hidden_size, projector_dim, z_dim) for z_dim in z_dims
+            ])
+
+    def shift_time(self, t):
+        shifted_t = self.tshift * t / (1 + (self.tshift - 1) * t)
+        return shifted_t
+
+    def normalize_latents(self, z):
+        bs = z.shape[0]
+        if self.vae_1d:
+            normalized_z = self.bn(z.transpose(1, 2)).transpose(1, 2)
+        else:
+            normalized_z = self.bn(z)
+
+        if self.tk_drop > 0:
+            if self.tk_drop_mode == "drop":
+                if self.vae_1d:
+                    prob = torch.ones(bs, 1, 1).to(device=z.device, dtype=z.dtype) * self.p
+                else:
+                    prob = torch.ones(bs, 1, 1, 1).to(device=z.device, dtype=z.dtype) * self.p
+                if self.tk_drop_dim == 1:
+                    normalized_z[:, self.tk_drop:] = normalized_z[:, self.tk_drop:] * torch.bernoulli(prob)
+                elif self.tk_drop_dim == 2:
+                    normalized_z[:, :, self.tk_drop:] = normalized_z[:, :, self.tk_drop:] * torch.bernoulli(prob)
+                else:
+                    raise ValueError
+            elif self.tk_drop_mode == "scale":
+                if self.tk_drop_dim == 1:
+                    normalized_z[:, self.tk_drop:] = normalized_z[:, self.tk_drop:] * self.p
+                elif self.tk_drop_dim == 2:
+                    normalized_z[:, :, self.tk_drop:] = normalized_z[:, :, self.tk_drop:] * self.p
+                else:
+                    raise ValueError
+        
+        return normalized_z
+
+    def denormalize_latents(self, z):
+        if self.tk_drop > 0 and self.tk_drop_mode == "scale":
+            if self.vae_1d:
+                z[:, :, self.tk_drop:] = z[:, :, self.tk_drop:] / self.p
+            else:
+                z[:, self.tk_drop:, :, :] = z[:, self.tk_drop:, :, :] / self.p
+
+        latents_stats = self.extract_latents_stats()
+        if len(z.shape) == 4:
+            latents_scale = latents_stats["latents_scale"].view(
+                1, self.in_channels, 1, 1
+            )
+            latents_bias = latents_stats["latents_bias"].view(
+                1, self.in_channels, 1, 1
+            )
+        else:
+            latents_scale = latents_stats["latents_scale"].view(
+                1, 1, self.in_channels
+            )
+            latents_bias = latents_stats["latents_bias"].view(
+                1, 1, self.in_channels
+            )
+        z_denorm = denorm_fun(z, latents_scale, latents_bias)
+        return z_denorm
+
+    def initialize_weights(self):
+        # Initialize transformer layers:
+        def _basic_init(module):
+            if isinstance(module, nn.Linear):
+                torch.nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
+
+        self.apply(_basic_init)
+
+        # Initialize (and freeze) pos_embed by sin-cos embedding:
+
+        if not self.vae_1d:
+            pos_embed = get_2d_sincos_pos_embed(
+                self.pos_embed.shape[-1], int(self.x_embedder.num_patches**0.5)
+            )
+        else:
+            pos_embed = positionalencoding1d(
+                self.pos_embed.shape[-1], self.pos_embed.shape[-2]
+            )
+
+        self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
+
+        # Initialize patch_embed like nn.Linear (instead of nn.Conv2d):
+
+        if not self.vae_1d:
+            w = self.x_embedder.proj.weight.data
+            nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
+            nn.init.constant_(self.x_embedder.proj.bias, 0)
+        else:
+            w = self.x_embedder.weight.data
+            nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
+            nn.init.constant_(self.x_embedder.bias, 0)
+
+        # Initialize timestep embedding MLP:
+        nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
+        nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
+
+        # Zero-out adaLN modulation layers in SiT blocks:
+        for block in self.blocks:
+            block.initialize_adaLN_zero()
+
+        # Zero-out output layers:
+        nn.init.constant_(self.final_layer.adaLN_modulation[-1].weight, 0)
+        nn.init.constant_(self.final_layer.adaLN_modulation[-1].bias, 0)
+        nn.init.constant_(self.final_layer.linear.weight, 0)
+        nn.init.constant_(self.final_layer.linear.bias, 0)
+
+    def init_bn(self, latents_scale, latents_bias):
+        # latents_scale = 1 / sqrt(variance); latents_bias = mean
+        self.bn.running_mean = latents_bias
+        self.bn.running_var = (1.0 / latents_scale).pow(2)
+
+    def extract_latents_stats(self):
+        # rsqrt is the reciprocal of the square root
+        latent_stats = dict(
+            latents_scale=self.bn.running_var.rsqrt(),
+            latents_bias=self.bn.running_mean,
+        )
+        return latent_stats
+
+    def unpatchify(self, x, patch_size=None):
+        """
+        x: (N, T, patch_size**2 * C)
+        imgs: (N, C, H, W)
+        """
+        c = self.out_channels
+        p = self.x_embedder.patch_size[0] if patch_size is None else patch_size
+        h = w = int(x.shape[1] ** 0.5)
+        assert h * w == x.shape[1]
+
+        x = x.reshape(shape=(x.shape[0], h, w, p, p, c))
+        x = torch.einsum("nhwpqc->nchpwq", x)
+        imgs = x.reshape(shape=(x.shape[0], c, h * p, w * p))
+        return imgs
+
+    def interpolant(self, t, path_type=None):
+        if path_type == "linear":
+            alpha_t = 1 - t
+            sigma_t = t
+            d_alpha_t = -1
+            d_sigma_t = 1
+        elif path_type == "cosine":
+            alpha_t = torch.cos(t * np.pi / 2)
+            sigma_t = torch.sin(t * np.pi / 2)
+            d_alpha_t = -np.pi / 2 * torch.sin(t * np.pi / 2)
+            d_sigma_t = np.pi / 2 * torch.cos(t * np.pi / 2)
+        else:
+            raise NotImplementedError()
+
+        return alpha_t, sigma_t, d_alpha_t, d_sigma_t
+
+    def custom(self, module):
+        def custom_forward(*inputs):
+            inputs = module(inputs[0], inputs[1])
+            return inputs
+
+        return custom_forward
+
+    def forward(
+        self,
+        x,
+        y,
+        loss_kwargs,
+        y_mask=None,
+        time_input=None,
+        noises=None,
+        zs=None, # alignment
+        return_feat=False,
+        **kwargs,
+    ):
+        """
+        Forward pass of SiT, integrating the loss function computation
+        x: (N, C, H, W) tensor of spatial inputs (images or latent representations of images UNNORMALIZED)
+        t: (N,) tensor of diffusion timesteps
+        y: (N,) tensor of class labels
+        loss_kwargs: dictionary of loss function arguments, should contain: `weighting`, `path_type`, `prediction`,
+        time_input: optionally provide a tensor of timesteps to use for the forward pass, otherwise sample from a distribution
+        noises: optionally provide a tensor of noises to use for the forward pass, otherwise sample from a distribution
+        """
+        x_ori = x.clone()
+        # Normalize the input x with batch norm running stats
+        normalized_x = self.normalize_latents(x)
+
+        # sample timesteps if not provided
+        if time_input is None:
+            if loss_kwargs["weighting"] == "uniform":
+                if self.vae_1d:
+                    time_input = torch.rand((normalized_x.shape[0], 1, 1))
+                else:
+                    time_input = torch.rand((normalized_x.shape[0], 1, 1, 1))
+            elif loss_kwargs["weighting"] == "lognormal":
+                # sample timestep according to log-normal distribution of sigmas following EDM
+                if self.vae_1d:
+                    rnd_normal = torch.randn((normalized_x.shape[0], 1, 1, 1))
+                else:
+                    rnd_normal = torch.rand((normalized_x.shape[0], 1, 1, 1))
+                sigma = rnd_normal.exp()
+                if loss_kwargs["path_type"] == "linear":
+                    time_input = sigma / (1 + sigma)
+                elif loss_kwargs["path_type"] == "cosine":
+                    time_input = 2 / np.pi * torch.atan(sigma)
+            else:
+                raise NotImplementedError(
+                    f"Weighting scheme {loss_kwargs['weighting']} not implemented."
+                )
+        time_input = time_input.to(device=normalized_x.device, dtype=normalized_x.dtype)
+
+        time_input = self.shift_time(time_input)
+        time_input = time_input.clamp(min=self.t_eps)  # avoid t=0 which may cause instability for v prediction
+
+        # sample noises if not provided
+        if noises is None:
+            noises = torch.randn_like(normalized_x)
+        else:
+            noises = noises.to(device=normalized_x.device, dtype=normalized_x.dtype)
+
+        # compute interpolant
+        alpha_t, sigma_t, d_alpha_t, d_sigma_t = self.interpolant(
+            time_input, path_type=loss_kwargs["path_type"]
+        )
+
+        # zt = (1-t) x + t eps
+        model_input = alpha_t * normalized_x + sigma_t * noises
+        if loss_kwargs["prediction"] == "v":
+            # v = - x + eps
+            # v = (zt - x) / t
+            model_target = d_alpha_t * normalized_x + d_sigma_t * noises
+        else:
+            raise NotImplementedError()  # TODO: add x or eps prediction
+
+        x = (
+            self.x_embedder(model_input) + self.pos_embed
+        )  # (N, T, D), where T = H * W / patch_size ** 2
+        N, T, D = x.shape
+        # timestep and class embedding
+        t_embed = self.t_embedder(time_input.flatten())  # (N, D)
+        y = self.y_embedder(y)  # (N, Ty, D)
+        c = t_embed  # (N, D)
+        zs_tilde, fs_tilde = [], []
+        for i, block in enumerate(self.blocks):
+            # checkpoint
+            # x = torch.utils.checkpoint.checkpoint(block, x, c, use_reentrant=False)
+            x, y = block(x, y, c, text_mask=y_mask)  # (N, T, D)
+            if return_feat is True and (i + 1) == self.encoder_depth:
+                fs_tilde = [x.reshape(-1, T, D)]
+            if (zs is not None) and (i + 1) == self.encoder_depth:
+                zs_tilde = [projector(x.reshape(-1, D)).reshape(N, T, -1) for projector in self.projectors]
+                # NOTE: add a shortcut for feature extraction
+                if loss_kwargs.get("align_only", False):
+                    break
+        
+        x = self.final_layer(x, c)  # (N, T, patch_size ** 2 * out_channels)
+        if not self.vae_1d:
+            x = self.unpatchify(x)  # (N, out_channels, H, W)
+
+        if self.prediction_internal == "x":
+            pred_x_normalized = x
+            x = (model_input - x) / time_input
+        elif self.prediction_internal == "v":
+            pred_x_normalized = model_input - time_input * x
+            x = x
+        else:
+            raise NotImplementedError()
+            # from x prediction to v prediction:
+
+        denoising_loss = mean_flat((x - model_target) ** 2)
+
+        if not self.vae_1d:
+            mean_x = torch.mean(x_ori, dim=1, keepdim=True)
+            std_x = torch.std(x_ori, dim=1, keepdim=True)
+        else:
+            mean_x = torch.mean(x_ori, dim=2, keepdim=True)
+            std_x = torch.std(x_ori, dim=2, keepdim=True)
+
+        pred_x = pred_x_normalized * std_x + mean_x
+
+        proj_loss = torch.tensor(0., device=x.device)
+
+        if zs is not None:
+            bsz = zs[0].shape[0]
+            for i, (z, z_tilde) in enumerate(zip(zs, zs_tilde)):
+                for z_j, z_tilde_j in zip(z, z_tilde):
+                    z_tilde_j = torch.nn.functional.normalize(z_tilde_j, dim=-1) 
+                    z_j = torch.nn.functional.normalize(z_j, dim=-1) 
+                    proj_loss += mean_flat(-(z_j * z_tilde_j).sum(dim=-1))
+            proj_loss /= (len(zs) * bsz)
+
+        ret_dict = {
+            "pred_x": pred_x,
+            "model_output": x,
+            "denoising_loss": denoising_loss,
+            "time_input": time_input,
+            "noises": noises,
+            "zs_tilde": zs_tilde,
+            "fs_tilde": fs_tilde,
+            "proj_loss": proj_loss,
+        }
+
+        return ret_dict
+
+    @torch.no_grad()
+    def inference(self, x, t, y, y_mask=None, **kwargs):
+        zt = x.clone()
+        x = (
+            self.x_embedder(x) + self.pos_embed
+        )  # (N, T, D), where T = H * W / patch_size ** 2
+        N, T, D = x.shape
+        # timestep and class embedding
+        t_embed = self.t_embedder(t)  # (N, D)
+        y = self.y_embedder(y)  # (N, D)
+        c = t_embed  # (N, D)
+
+        for block in self.blocks:
+            x, y = block(x, y, c, text_mask=y_mask)  # (N, T, D)
+        x = self.final_layer(x, c)  # (N, T, patch_size ** 2 * out_channels)
+        if not self.vae_1d:
+            x = self.unpatchify(x)  # (N, out_channels, H, W)
+        if self.prediction_internal == "x":
+            if not self.vae_1d:
+                x = (zt - x) / t[:,None,None,None]
+            else:
+                x = (zt - x) / t[:,None,None]
+        elif self.prediction_internal == "v" or self.prediction_internal is None:
+            x = x
+        else:
+            raise NotImplementedError()
+        
+        return x
+
+    @torch.no_grad()
+    def forward_feats(self, x, t, y, depth, y_mask=None):
+        assert 1 <= depth <= len(self.blocks)
+        x = (
+            self.x_embedder(x) + self.pos_embed
+        )  # (N, T, D), where T = H * W / patch_size ** 2
+
+        # timestep and class embedding
+        t_embed = self.t_embedder(t)  # (N, D)
+        y = self.y_embedder(y, self.training)  # (N, D)
+        c = t_embed  # (N, D)
+
+        for i, block in enumerate(self.blocks):
+            x, y = block(x, y, c, text_mask=y_mask)  # (N, T, D)
+            if (i + 1) == depth:
+                return x
+
+        return None
 
 #################################################################################
 #                   Sine/Cosine Positional Embedding Functions                  #
@@ -925,3 +1425,95 @@ SiT_models = {
     "UNet/1": UNet_1,
     "UNet/2": UNet_2,
 }
+
+
+class BNRunner(nn.Module):
+    """
+    Diffusion model with a Transformer backbone.
+    """
+
+    def __init__(
+        self,
+        input_size=32,
+        in_channels=4,
+        bn_momentum=0.1,
+        vae_1d=False,
+        **block_kwargs,  # fused_attn
+    ):
+        super().__init__()
+        self.in_channels = in_channels
+        self.out_channels = in_channels
+        self.vae_1d = vae_1d
+
+        if self.vae_1d:
+            self.bn = torch.nn.BatchNorm1d(
+                in_channels,
+                eps=1e-4,
+                momentum=bn_momentum,
+                affine=False,
+                track_running_stats=True,
+            )
+        else:
+            self.bn = torch.nn.BatchNorm2d(
+                in_channels,
+                eps=1e-4,
+                momentum=bn_momentum,
+                affine=False,
+                track_running_stats=True,
+            )
+
+    def normalize_latents(self, z):
+        if self.vae_1d:
+            normalized_z = self.bn(z.transpose(1, 2)).transpose(1, 2)
+        else:
+            normalized_z = self.bn(z)        
+        return normalized_z
+
+    def denormalize_latents(self, z):
+        latents_stats = self.extract_latents_stats()
+        if len(z.shape) == 4:
+            latents_scale = latents_stats["latents_scale"].view(
+                1, self.in_channels, 1, 1
+            )
+            latents_bias = latents_stats["latents_bias"].view(
+                1, self.in_channels, 1, 1
+            )
+        else:
+            latents_scale = latents_stats["latents_scale"].view(
+                1, 1, self.in_channels
+            )
+            latents_bias = latents_stats["latents_bias"].view(
+                1, 1, self.in_channels
+            )
+        z_denorm = denorm_fun(z, latents_scale, latents_bias)
+        return z_denorm
+
+    def init_bn(self, latents_scale, latents_bias):
+        # latents_scale = 1 / sqrt(variance); latents_bias = mean
+        self.bn.running_mean = latents_bias
+        self.bn.running_var = (1.0 / latents_scale).pow(2)
+
+    def extract_latents_stats(self):
+        # rsqrt is the reciprocal of the square root
+        latent_stats = dict(
+            latents_scale=self.bn.running_var.rsqrt(),
+            latents_bias=self.bn.running_mean,
+        )
+        return latent_stats
+
+    def custom(self, module):
+        def custom_forward(*inputs):
+            inputs = module(inputs[0], inputs[1])
+            return inputs
+
+        return custom_forward
+
+    def forward(
+        self,
+        x,
+        **kwargs,
+    ):
+        x_ori = x.clone()
+        # Normalize the input x with batch norm running stats
+        normalized_x = self.normalize_latents(x)
+        return normalized_x

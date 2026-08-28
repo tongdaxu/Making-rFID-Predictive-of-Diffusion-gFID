@@ -1,0 +1,3 @@
+target: ifid.vae.dinov3_vae.DINOv3ResVAE
+params:
+  ckpt_path: teacher_checkpoint.pth

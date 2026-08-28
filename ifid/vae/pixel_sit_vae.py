@@ -119,7 +119,7 @@ class PixelSiTVAE(nn.Module):
         if ckpt_file is None:
             raise ValueError("ckpt_file is required, or provide exp_path + train_steps.")
 
-        raw_ckpt = torch.load(ckpt_file, map_location="cpu")
+        raw_ckpt = torch.load(ckpt_file, map_location="cpu", weights_only=False)
 
         if isinstance(raw_ckpt, dict) and state_key in raw_ckpt:
             state_dict = raw_ckpt[state_key]
@@ -168,7 +168,7 @@ class PixelSiTVAE(nn.Module):
             qk_norm=cfg["qk_norm"],
         )
 
-        raw_ckpt = torch.load(ckpt_file, map_location="cpu")
+        raw_ckpt = torch.load(ckpt_file, map_location="cpu", weights_only=False)
         if isinstance(raw_ckpt, dict) and state_key in raw_ckpt:
             state_dict = raw_ckpt[state_key]
         else:

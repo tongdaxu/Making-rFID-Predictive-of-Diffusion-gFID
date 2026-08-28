@@ -1,0 +1,6 @@
+target: ifid.vae.dinov3pit.DINOVAE
+params:
+  feat_indice: [-16]
+  z_channels: 128
+  down_factor: 16
+  ckpt_path: last.ckpt

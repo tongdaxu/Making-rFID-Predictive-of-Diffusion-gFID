@@ -473,6 +473,7 @@ class AutoencoderKL(nn.Module):
         use_variational=True,
         use_pre_post=True,
         mid_attn=True,
+        attn_resolutions=(16,)
     ):
         super().__init__()
         self.encoder = Encoder(
@@ -480,12 +481,14 @@ class AutoencoderKL(nn.Module):
             num_res_blocks=num_res_blocks,
             z_channels=embed_dim,
             mid_attn=mid_attn,
+            attn_resolutions=attn_resolutions,
         )
         self.decoder = Decoder(
             ch_mult=ch_mult,
             num_res_blocks=num_res_blocks,
             z_channels=embed_dim,
             mid_attn=mid_attn,
+            attn_resolutions=attn_resolutions,
         )
         self.use_variational = use_variational
         mult = 2 if self.use_variational else 1

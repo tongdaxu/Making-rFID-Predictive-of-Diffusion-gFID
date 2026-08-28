@@ -1,0 +1,5 @@
+target: ifid.vae.vtp.VTPResVAE
+params:
+  vtp_ckpt: MiniMaxAI/VTP-Large-f16d64
+  use_mse_decoder: True
+  ckpt_path: ./checkpoints/ckpt.ckpt

@@ -74,7 +74,7 @@ class RAE(nn.Module):
                     filename=fname,
                 )
             print(f"Loading pretrained decoder from {pretrained_decoder_path}")
-            state_dict = torch.load(pretrained_decoder_path, map_location="cpu")
+            state_dict = torch.load(pretrained_decoder_path, map_location="cpu", weights_only=False)
             keys = self.decoder.load_state_dict(state_dict, strict=False)
             if len(keys.missing_keys) > 0:
                 print(
@@ -89,7 +89,7 @@ class RAE(nn.Module):
                     repo_id=repo_id,
                     filename=fname,
                 )
-            stats = torch.load(normalization_stat_path, map_location="cpu")
+            stats = torch.load(normalization_stat_path, map_location="cpu", weights_only=False)
             self.latent_mean = stats.get("mean", None)
             self.latent_var = stats.get("var", None)
             self.do_normalization = True
@@ -174,7 +174,7 @@ def instantiate_rae_from_config(config) -> object:
     model = get_obj_from_str(config["target"])(**config.get("params", dict()))
     ckpt_path = config.get("ckpt", None)
     if ckpt_path is not None:
-        state_dict = torch.load(ckpt_path, map_location="cpu")
+        state_dict = torch.load(ckpt_path, map_location="cpu", weights_only=False)
         # see if it's a ckpt from training by checking for "model"
         if "ema" in state_dict:
             state_dict = state_dict["ema"]

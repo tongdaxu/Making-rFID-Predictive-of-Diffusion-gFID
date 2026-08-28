@@ -1,3 +1,4 @@
 target: ifid.vae.dino.DINOFlowVAE
 params:
-  ckpt_path: /video_ssd/kongzishang/xutongda/git/REPA-E/exps/sit-xl-flow-old-400k/checkpoints/0050000.pt
+  ckpt_path: ./checkpoints/0100000.pt
+  size: small

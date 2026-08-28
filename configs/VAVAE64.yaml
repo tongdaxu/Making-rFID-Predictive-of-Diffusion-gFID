@@ -1,5 +1,8 @@
 target: ifid.vae.klvae.KLVAE
 params:
   embed_dim: 64
-  ch_mult: [1, 1, 2, 2, 4, 4]
-  ckpt_path: hustvl/va-vae-imagenet256-experimental-variants/vavae-imagenet256-f16d64-dinov2-50ep.ckpt
+  ch_mult: [1, 2, 4, 8, 8]
+  mid_attn: False
+  use_pre_post: False
+  attn_resolutions: []
+  ckpt_path: ./checkpoints/ckpt.ckpt

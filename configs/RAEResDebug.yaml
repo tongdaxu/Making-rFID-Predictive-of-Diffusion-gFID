@@ -1,0 +1,3 @@
+target: ifid.vae.rae.RAEResDebug
+params:
+  rae_config: /mnt/task_runtime/configs/rae_DINOv2-B.yaml

@@ -1,0 +1,3 @@
+target: ifid.vae.pixel.PIXELFLOW
+params:
+  flow_ckpt_path: ./nice-400k/checkpoints/0050000.pt

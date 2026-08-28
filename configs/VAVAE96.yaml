@@ -1,0 +1,8 @@
+target: ifid.vae.klvae.KLVAE
+params:
+  embed_dim: 96
+  ch_mult: [1, 2, 4, 8, 8]
+  mid_attn: False
+  use_pre_post: False
+  attn_resolutions: []
+  ckpt_path: ./checkpoints/ckpt.ckpt
