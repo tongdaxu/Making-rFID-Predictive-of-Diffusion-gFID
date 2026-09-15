@@ -8,6 +8,7 @@ setup(
         "ifid.sit",
         "ifid.unet",
         "ifid.fid",
+        "ifid.ddt",
         "ifid.vae",
         "ifid.vae.dinov3",
         "ifid.vae.dinov3.layers",

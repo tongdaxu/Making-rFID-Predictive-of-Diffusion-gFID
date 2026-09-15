@@ -165,8 +165,6 @@ def main(args):
     ys = ys.to(device)
     # Create sampling noise:
     n = ys.size(0)
-    if args.ploss:
-        loss_fn_vgg = lpips.LPIPS(net='vgg').to(device)
     # Create model:
     vae_config = OmegaConf.load(args.vae_config)
     vae = instantiate_from_config(vae_config).to(device)
@@ -199,13 +197,11 @@ def main(args):
 
     tshift = math.sqrt(float(fake_z.numel()) / 4096.0)
 
-    block_kwargs = {"fused_attn": args.fused_attn, "qk_norm": args.qk_norm}
     model = BNRunner(
         input_size=latent_size,
         in_channels=in_channels,
         bn_momentum=args.bn_momentum,
         vae_1d=vae_1d,
-        **block_kwargs,
     )
 
     # make a copy of the model for EMA
@@ -256,8 +252,8 @@ def main(args):
     torch._dynamo.config.accumulated_cache_size_limit = 512
     # Model compilation for better performance
 
-    model, vae, optimizer, train_dataloader = accelerator.prepare(
-        model, vae, optimizer, train_dataloader
+    model, vae, train_dataloader = accelerator.prepare(
+        model, vae, train_dataloader
     )
 
     if accelerator.is_main_process:
@@ -302,7 +298,7 @@ def main(args):
                     unwrapped_model = accelerator.unwrap_model(model)
                     update_ema(
                         ema,
-                        unwrapped_model._orig_mod if args.compile else unwrapped_model,
+                        unwrapped_model,
                     )
 
             # enter
@@ -317,12 +313,11 @@ def main(args):
 
                     # model might be compiled, we extract the original model
                     original_model = (
-                        unwrapped_model._orig_mod if args.compile else unwrapped_model
+                        unwrapped_model
                     )
                     checkpoint = {
                         "model": original_model.state_dict(),
                         "ema": ema.state_dict(),
-                        "opt": optimizer.state_dict(),
                         "args": args,
                         "steps": global_step,
                     }
@@ -358,18 +353,9 @@ def parse_args(input_args=None):
 
     parser.add_argument("--num-classes", type=int, default=1000)
     parser.add_argument(
-        "--qk-norm", action=argparse.BooleanOptionalAction, default=False
-    )
-    parser.add_argument(
         "--fused-attn", action=argparse.BooleanOptionalAction, default=True
     )
     parser.add_argument("--bn-momentum", type=float, default=0.1)
-    parser.add_argument(
-        "--compile",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Whether to compile the model for faster training",
-    )
 
     # dataset params
     parser.add_argument("--data-dir", type=str, default="data")
@@ -382,10 +368,6 @@ def parse_args(input_args=None):
     )
 
     parser.add_argument(
-        "--ploss", action=argparse.BooleanOptionalAction, default=False
-    )
-
-    parser.add_argument(
         "--mixed-precision", type=str, default="fp16", choices=["no", "fp16", "bf16"]
     )
 
@@ -394,74 +376,16 @@ def parse_args(input_args=None):
     parser.add_argument("--max-train-steps", type=int, default=400000)
     parser.add_argument("--checkpointing-steps", type=int, default=50000)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
-    parser.add_argument("--learning-rate", type=float, default=1e-4)
-    parser.add_argument(
-        "--adam-beta1",
-        type=float,
-        default=0.9,
-        help="The beta1 parameter for the Adam optimizer.",
-    )
-    parser.add_argument(
-        "--adam-beta2",
-        type=float,
-        default=0.999,
-        help="The beta2 parameter for the Adam optimizer.",
-    )
-    parser.add_argument(
-        "--adam-weight-decay", type=float, default=0.0, help="Weight decay to use."
-    )
-    parser.add_argument(
-        "--adam-epsilon",
-        type=float,
-        default=1e-08,
-        help="Epsilon value for the Adam optimizer",
-    )
-    parser.add_argument(
-        "--max-grad-norm", default=1.0, type=float, help="Max gradient norm."
-    )
-    parser.add_argument(
-        "--max-grad-norm-vae", default=1.0, type=float, help="Max gradient norm."
-    )
-
     # seed params
     parser.add_argument("--seed", type=int, default=0)
 
     # cpu params
     parser.add_argument("--num-workers", type=int, default=4)
 
-    # loss params
-    parser.add_argument(
-        "--path-type", type=str, default="linear", choices=["linear", "cosine"]
-    )
-    parser.add_argument(
-        "--prediction",
-        type=str,
-        default="v",
-        choices=["v"],
-        help="currently we only support v-prediction",
-    )
-    parser.add_argument(
-        "--prediction-internal",
-        type=str,
-        default="v",
-        choices=["v", "x"],
-        help="internal prediction type, could be x or v, only used for loss computation and does not affect the model architecture",
-    )
     parser.add_argument("--cfg-prob", type=float, default=0.1)
-    parser.add_argument(
-        "--weighting",
-        default="uniform",
-        type=str,
-        choices=["uniform", "lognormal"],
-        help="Loss weihgting, uniform or lognormal",
-    )
 
     # vae params
     parser.add_argument("--vae-config", type=str, default="")
-    parser.add_argument("--token-drop", type=int, default=-1)
-    parser.add_argument("--token-drop-mode", type=str, default="drop")
-    parser.add_argument("--token-drop-param", type=float, default=1.0)
-    parser.add_argument("--token-drop-dim", type=int, default=1)
 
     if input_args is not None:
         args = parser.parse_args(input_args)

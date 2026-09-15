@@ -29,8 +29,702 @@ from ifid.sit.sit import mean_flat
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from torchvision.transforms import Normalize
 import torch.nn.functional as F
+import torch.nn as nn
 logger = get_logger(__name__)
 
+from torch.distributed.nn.functional import all_gather
+
+def differentiable_all_gather(x):
+    if not torch.distributed.is_initialized():
+        return x
+    return torch.cat(all_gather(x), dim=0)
+
+class EMAFeatureStats(nn.Module):
+    """
+    EMA first/second moments for FD.
+
+    Follows the EMA formulation of the official FD-Loss implementation:
+
+        mu  = beta * mu_ema
+              + (1-beta) * mean(current_feats)
+
+        m2  = beta * m2_ema
+              + (1-beta) * E[x x^T]
+
+        cov = m2 - mu mu^T
+
+    `build_stats()` is differentiable w.r.t. current features.
+    `update()` modifies the EMA using detached features.
+    """
+
+    def __init__(self, feat_dim, beta=0.999):
+        super().__init__()
+
+        self.feat_dim = feat_dim
+        self.beta = beta
+
+        self.register_buffer(
+            "mu_ema",
+            torch.zeros(feat_dim, dtype=torch.float64)
+        )
+
+        self.register_buffer(
+            "m2_ema",
+            torch.zeros(
+                feat_dim,
+                feat_dim,
+                dtype=torch.float64,
+            )
+        )
+
+        self.register_buffer(
+            "initialized",
+            torch.tensor(False)
+        )
+
+    def build_stats(self, feats):
+        """
+        Compute EMA-blended statistics while preserving gradient
+        through the current features.
+
+        feats: [B, C]
+        """
+
+        feats = feats.double()
+
+        batch_mu = feats.mean(dim=0)
+        batch_m2 = feats.T @ feats / feats.shape[0]
+
+        # First batch: just use batch stats.
+        if not self.initialized.item():
+            mu = batch_mu
+            m2 = batch_m2
+
+        else:
+            beta = self.beta
+
+            mu = (
+                beta * self.mu_ema.detach()
+                + (1.0 - beta) * batch_mu
+            )
+
+            m2 = (
+                beta * self.m2_ema.detach()
+                + (1.0 - beta) * batch_m2
+            )
+
+        cov = m2 - mu[:, None] * mu[None, :]
+
+        # numerical symmetrization
+        cov = 0.5 * (cov + cov.T)
+
+        return mu, cov
+
+    @torch.no_grad()
+    def update(self, feats):
+        """
+        Update EMA state. Call AFTER constructing/backpropagating
+        the current FD loss.
+
+        feats should normally already be globally gathered.
+        """
+
+        feats = feats.detach().double()
+
+        batch_mu = feats.mean(dim=0)
+        batch_m2 = feats.T @ feats / feats.shape[0]
+
+        if not self.initialized.item():
+            self.mu_ema.copy_(batch_mu)
+            self.m2_ema.copy_(batch_m2)
+            self.initialized.fill_(True)
+            return
+
+        beta = self.beta
+
+        self.mu_ema.mul_(beta).add_(
+            batch_mu,
+            alpha=1.0 - beta,
+        )
+
+        self.m2_ema.mul_(beta).add_(
+            batch_m2,
+            alpha=1.0 - beta,
+        )
+
+class EMAFactorizedFeatureStats(nn.Module):
+    """
+    EMA statistics for features [B, L, C] under
+
+        Cov(vec(F)) ~= var * R_L kron R_C
+
+    where
+        R_L: [L, L], spatial covariance factor
+        R_C: [C, C], channel covariance factor
+
+    and approximately
+
+        trace(R_L) = L
+        trace(R_C) = C.
+
+    We keep EMA of RAW moments:
+        E[x]                  : [L, C]
+        E_c[x x^T]            : [L, L]
+        E_l[x^T x]            : [C, C]
+
+    so that covariance can be reconstructed correctly.
+    """
+
+    def __init__(self, beta=0.999, eps=1e-8):
+        super().__init__()
+
+        self.beta = beta
+        self.eps = eps
+
+        # Lazy initialization because DINO and teacher
+        # can have different L / C.
+        self.register_buffer("mu_ema", None)
+        self.register_buffer("m2_L_ema", None)
+        self.register_buffer("m2_C_ema", None)
+
+        self.register_buffer(
+            "initialized",
+            torch.tensor(False),
+        )
+
+    def _batch_raw_moments(self, feats):
+        """
+        feats: [B, L, C]
+
+        Returns:
+            mu       [L, C]
+            m2_L     [L, L]
+            m2_C     [C, C]
+        """
+        feats = feats.double()
+
+        B, L, C = feats.shape
+
+        # E_b[x]
+        mu = feats.mean(dim=0)                     # [L, C]
+
+        # E_{b,c}[ x_lc x_mc ]
+        m2_L = torch.einsum(
+            "blc,bmc->lm",
+            feats,
+            feats,
+        ) / (B * C)
+
+        # E_{b,l}[ x_blc x_bld ]
+        m2_C = torch.einsum(
+            "blc,bld->cd",
+            feats,
+            feats,
+        ) / (B * L)
+
+        return mu, m2_L, m2_C
+
+    def _moments_to_stats(
+        self,
+        mu,
+        m2_L,
+        m2_C,
+    ):
+        """
+        Convert raw moments to
+
+            mean  : [L, C]
+            var   : scalar
+            R_L   : [L, L]
+            R_C   : [C, C]
+        """
+
+        L, C = mu.shape
+
+        # --------------------------------------------------
+        # Spatial covariance
+        #
+        # E[x_l x_m] - E[x_l] E[x_m]
+        # averaged over channels.
+        # --------------------------------------------------
+        mu_outer_L = torch.einsum(
+            "lc,mc->lm",
+            mu,
+            mu,
+        ) / C
+
+        cov_L = m2_L - mu_outer_L
+        cov_L = 0.5 * (cov_L + cov_L.T)
+
+        # --------------------------------------------------
+        # Channel covariance
+        #
+        # E[x_c x_d] - E[x_c] E[x_d]
+        # averaged over positions.
+        # --------------------------------------------------
+        mu_outer_C = torch.einsum(
+            "lc,ld->cd",
+            mu,
+            mu,
+        ) / L
+
+        cov_C = m2_C - mu_outer_C
+        cov_C = 0.5 * (cov_C + cov_C.T)
+
+        # --------------------------------------------------
+        # Overall variance.
+        #
+        # trace(m2_L) / L = E[x^2]
+        # --------------------------------------------------
+        second_moment = torch.trace(m2_L) / L
+        mean_square = mu.square().mean()
+
+        var = (second_moment - mean_square).clamp_min(
+            self.eps
+        )
+
+        # --------------------------------------------------
+        # Normalize factors so approximately:
+        #
+        # trace(R_L) = L
+        # trace(R_C) = C
+        #
+        # Both cov_L and cov_C have average diagonal = var.
+        # --------------------------------------------------
+        R_L = cov_L / var
+        R_C = cov_C / var
+
+        # numerical symmetrization
+        R_L = 0.5 * (R_L + R_L.T)
+        R_C = 0.5 * (R_C + R_C.T)
+
+        return mu, var, R_L, R_C
+
+    def build_stats(self, feats):
+        """
+        Differentiable current statistics:
+
+            EMA = beta * old_ema
+                  + (1-beta) * current_batch
+
+        Current batch remains differentiable.
+
+        feats: [B, L, C]
+        """
+
+        assert feats.ndim == 3
+
+        (
+            batch_mu,
+            batch_m2_L,
+            batch_m2_C,
+        ) = self._batch_raw_moments(feats)
+
+        if not self.initialized.item():
+
+            mu = batch_mu
+            m2_L = batch_m2_L
+            m2_C = batch_m2_C
+
+        else:
+
+            beta = self.beta
+
+            mu = (
+                beta * self.mu_ema.detach()
+                + (1.0 - beta) * batch_mu
+            )
+
+            m2_L = (
+                beta * self.m2_L_ema.detach()
+                + (1.0 - beta) * batch_m2_L
+            )
+
+            m2_C = (
+                beta * self.m2_C_ema.detach()
+                + (1.0 - beta) * batch_m2_C
+            )
+
+        return self._moments_to_stats(
+            mu,
+            m2_L,
+            m2_C,
+        )
+
+    @torch.no_grad()
+    def update(self, feats):
+        """
+        Update persistent EMA state.
+
+        feats should already contain GLOBAL features
+        gathered across GPUs.
+        """
+
+        feats = feats.detach().double()
+
+        (
+            batch_mu,
+            batch_m2_L,
+            batch_m2_C,
+        ) = self._batch_raw_moments(feats)
+
+        if not self.initialized.item():
+
+            # lazy initialization
+            self.mu_ema = batch_mu.clone()
+            self.m2_L_ema = batch_m2_L.clone()
+            self.m2_C_ema = batch_m2_C.clone()
+
+            self.initialized.fill_(True)
+            return
+
+        beta = self.beta
+
+        self.mu_ema.mul_(beta).add_(
+            batch_mu,
+            alpha=1.0 - beta,
+        )
+
+        self.m2_L_ema.mul_(beta).add_(
+            batch_m2_L,
+            alpha=1.0 - beta,
+        )
+
+        self.m2_C_ema.mul_(beta).add_(
+            batch_m2_C,
+            alpha=1.0 - beta,
+        )
+
+def bures_affinity(A, B, eps=1e-8):
+    """
+    Tr[
+        (A^{1/2} B A^{1/2})^{1/2}
+    ]
+
+    A, B: [D, D] PSD matrices
+    """
+
+    D = A.shape[0]
+
+    eye = torch.eye(
+        D,
+        device=A.device,
+        dtype=A.dtype,
+    )
+
+    A = 0.5 * (A + A.T)
+    B = 0.5 * (B + B.T)
+
+    A = A + eps * eye
+    B = B + eps * eye
+
+    # A^{1/2}
+    evals_A, evecs_A = torch.linalg.eigh(A)
+
+    evals_A = evals_A.clamp_min(0)
+
+    A_sqrt = (
+        evecs_A
+        * evals_A.sqrt().unsqueeze(0)
+    ) @ evecs_A.T
+
+    # A^{1/2} B A^{1/2}
+    middle = (
+        A_sqrt
+        @ B
+        @ A_sqrt
+    )
+
+    middle = 0.5 * (
+        middle + middle.T
+    )
+
+    evals_middle = torch.linalg.eigvalsh(
+        middle
+    ).clamp_min(0)
+
+    return evals_middle.sqrt().sum()
+
+def factorized_frechet_from_stats(
+    mu_pred,
+    var_pred,
+    R_L_pred,
+    R_C_pred,
+    mu_ref,
+    var_ref,
+    R_L_ref,
+    R_C_ref,
+    eps=1e-8,
+):
+    """
+    FD under
+
+        Sigma ~= var * R_L kron R_C
+
+    mu_*:   [L, C]
+    R_L_*:  [L, L]
+    R_C_*:  [C, C]
+    """
+
+    L, C = mu_pred.shape
+
+    # ======================================================
+    # Mean term
+    #
+    # This is exactly the flattened [L*C] mean distance.
+    # ======================================================
+    mean_term = (
+        mu_pred - mu_ref
+    ).square().sum()
+
+    # ======================================================
+    # Bures affinities of two factors
+    # ======================================================
+    affinity_L = bures_affinity(
+        R_L_ref,
+        R_L_pred,
+        eps=eps,
+    )
+
+    affinity_C = bures_affinity(
+        R_C_ref,
+        R_C_pred,
+        eps=eps,
+    )
+
+    # Since
+    #
+    #   trace(R_L) ~= L
+    #   trace(R_C) ~= C
+    #
+    # trace(Sigma) ~= var * L * C
+    #
+    trace_pred = var_pred * L * C
+    trace_ref = var_ref * L * C
+
+    # Kronecker property:
+    #
+    # affinity(Sigma_r, Sigma_p)
+    #
+    # = sqrt(var_r * var_p)
+    #   * affinity(RL_r, RL_p)
+    #   * affinity(RC_r, RC_p)
+    #
+    cross = (
+        torch.sqrt(
+            (var_pred * var_ref).clamp_min(0)
+            + eps
+        )
+        * affinity_L
+        * affinity_C
+    )
+
+    covariance_term = (
+        trace_pred
+        + trace_ref
+        - 2.0 * cross
+    )
+
+    return mean_term + covariance_term
+
+
+def ema_factorized_fd_loss(
+    feat_pred,
+    feat_ref,
+    pred_stats,
+    ref_stats,
+):
+    """
+    feat_pred: [B, L, C]
+    feat_ref:  [B, L, C]
+
+    Compute global multi-GPU EMA FD assuming
+
+        Cov(vec(F))
+            ~= var * R_L kron R_C
+
+    No spatial/token pooling is performed.
+    """
+
+    assert feat_pred.ndim == 3
+    assert feat_ref.ndim == 3
+
+    assert feat_pred.shape[1:] == feat_ref.shape[1:]
+
+    # ======================================================
+    # Gather across GPUs.
+    #
+    # [B_local, L, C]
+    #       ->
+    # [B_global, L, C]
+    # ======================================================
+
+    feat_pred_global = differentiable_all_gather(
+        feat_pred.float()
+    )
+
+    feat_ref_global = differentiable_all_gather(
+        feat_ref.float()
+    )
+
+    # ======================================================
+    # Differentiable EMA stats
+    # ======================================================
+
+    (
+        mu_pred,
+        var_pred,
+        R_L_pred,
+        R_C_pred,
+    ) = pred_stats.build_stats(
+        feat_pred_global
+    )
+
+    (
+        mu_ref,
+        var_ref,
+        R_L_ref,
+        R_C_ref,
+    ) = ref_stats.build_stats(
+        feat_ref_global
+    )
+
+    # ======================================================
+    # Factorized FD
+    # ======================================================
+
+    loss = factorized_frechet_from_stats(
+        mu_pred,
+        var_pred,
+        R_L_pred,
+        R_C_pred,
+
+        mu_ref,
+        var_ref,
+        R_L_ref,
+        R_C_ref,
+    )
+
+    return (
+        loss,
+        feat_pred_global,
+        feat_ref_global,
+    )
+
+def frechet_from_stats(
+    mu_pred,
+    cov_pred,
+    mu_ref,
+    cov_ref,
+    eps=1e-8,
+):
+    """
+    Differentiable FD from mean/covariance.
+
+    All inputs preferably float64.
+    """
+
+    mean_term = (mu_pred - mu_ref).square().sum()
+
+    C = cov_pred.shape[0]
+
+    eye = torch.eye(
+        C,
+        device=cov_pred.device,
+        dtype=cov_pred.dtype,
+    )
+
+    cov_pred = cov_pred + eps * eye
+    cov_ref = cov_ref + eps * eye
+
+    # sqrt(cov_ref)
+    evals_ref, evecs_ref = torch.linalg.eigh(cov_ref)
+
+    evals_ref = evals_ref.clamp_min(0)
+
+    cov_ref_sqrt = (
+        evecs_ref
+        * evals_ref.sqrt().unsqueeze(0)
+    ) @ evecs_ref.T
+
+    middle = (
+        cov_ref_sqrt
+        @ cov_pred
+        @ cov_ref_sqrt
+    )
+
+    middle = 0.5 * (middle + middle.T)
+
+    evals_middle = torch.linalg.eigvalsh(
+        middle
+    ).clamp_min(0)
+
+    covariance_term = (
+        torch.trace(cov_pred)
+        + torch.trace(cov_ref)
+        - 2.0 * evals_middle.sqrt().sum()
+    )
+
+    return mean_term + covariance_term
+
+
+def ema_fd_loss(
+    feat_pred,
+    feat_ref,
+    pred_stats,
+    ref_stats,
+):
+    """
+    feat_pred / feat_ref:
+        [B, C] or [B, L, C]
+
+    Uses GLOBAL batch across GPUs.
+    """
+
+    # [B, L, C] -> [B, C]
+    if feat_pred.ndim == 3:
+        feat_pred = feat_pred.mean(dim=1)
+
+    if feat_ref.ndim == 3:
+        feat_ref = feat_ref.mean(dim=1)
+
+    # Global generated features, differentiable
+    feat_pred_global = differentiable_all_gather(
+        feat_pred.float()
+    )
+
+    # Global reference features, no gradient needed
+    feat_ref_global = differentiable_all_gather(
+        feat_ref.float()
+    )
+
+    # Current loss uses:
+    #
+    # beta * previous EMA
+    # +
+    # (1-beta) * CURRENT batch
+    #
+    # Thus gradient flows through feat_pred_global.
+    mu_pred, cov_pred = pred_stats.build_stats(
+        feat_pred_global
+    )
+
+    mu_ref, cov_ref = ref_stats.build_stats(
+        feat_ref_global
+    )
+
+    loss = frechet_from_stats(
+        mu_pred,
+        cov_pred,
+        mu_ref,
+        cov_ref,
+    )
+
+    return (
+        loss,
+        feat_pred_global,
+        feat_ref_global,
+    )
 
 def count_trainable_params(m):
     return sum(p.numel() for p in m.parameters() if p.requires_grad)
@@ -195,6 +889,27 @@ def main(args):
 
     z_dims = [1024]
 
+    fd_beta = 0.999
+
+    if args.proj_type == 'fd_dino' or args.proj_type == 'fd_repa':
+        fd_dino_pred_stats = EMAFeatureStats(
+            feat_dim=1024,
+            beta=fd_beta,
+        ).to(device)
+        fd_dino_ref_stats = EMAFeatureStats(
+            feat_dim=1024,
+            beta=fd_beta,
+        ).to(device)
+    elif args.proj_type == 'fd_dino_fact':
+        fd_dino_pred_stats = EMAFactorizedFeatureStats(
+            beta=fd_beta,
+        ).to(device)
+        fd_dino_ref_stats = EMAFactorizedFeatureStats(
+            beta=fd_beta,
+        ).to(device)
+    else:
+        pass
+
     fake_in = torch.zeros([1, 3, args.resolution, args.resolution]).to(device)
     fake_z = vae.encode(fake_in)[0]
 
@@ -243,6 +958,7 @@ def main(args):
     requires_grad(ema, False)
 
     teacher = copy.deepcopy(model).to(device)
+    # teacher.encoder_depth = 4
     requires_grad(teacher, False)
 
     # Apply SyncBN if more than 1 GPU is used
@@ -396,8 +1112,9 @@ def main(args):
                     # a_t = ((time_t * (1 - time_in)) / (time_in * (1 - time_t) + 1e-3)).to(z.device)
                     # correction
                     z_t = sit_outputs["pred_x"]
+                    # z_t = vae.encode(vae.decode(z_t)) # idempotence
                     # z_t = a_t * z + (1 - a_t) * sit_outputs["pred_x"]
-                    teacher_outputs = teacher(
+                    teacher_outputs = ema(
                         x=torch.cat([z, z_t], dim=0),
                         y=torch.cat([labels, labels], dim=0),
                         loss_kwargs=loss_kwargs,
@@ -434,10 +1151,117 @@ def main(args):
                         return_feat=False,
                     )
                     proj_loss = teacher_outputs["proj_loss"]
+                elif args.proj_type == 'dino':
+                    x_t = ((vae.decode(sit_outputs["pred_x"]) + 1.0) / 2.0) * 255.0
+                    z_dis = encoder.forward_features(preprocess_raw_image(x_t, encoder_type))['x_norm_patchtokens']
+                    z_ref = zs[0]
+                    z_dis = F.normalize(z_dis, dim=-1) 
+                    z_ref = F.normalize(z_ref, dim=-1) 
+                    proj_loss = mean_flat(-(z_dis * z_ref).sum(dim=-1))
+                    proj_loss = torch.mean(proj_loss)
+                elif args.proj_type == 'fd_dino':
+                    x_t = ((vae.decode(sit_outputs["pred_x"]) + 1.0) / 2.0) * 255.0
+                    z_dis = encoder.forward_features(preprocess_raw_image(x_t, encoder_type))['x_norm_patchtokens']
+                    z_ref = zs[0]
+                    (
+                        proj_loss,
+                        fd_pred_feats,
+                        fd_ref_feats,
+                    ) = ema_fd_loss(
+                        z_dis,
+                        z_ref,
+                        fd_dino_pred_stats,
+                        fd_dino_ref_stats,
+                    )
+                    fd_dino_pred_stats.update(
+                        fd_pred_feats
+                    )
+                    fd_dino_ref_stats.update(
+                        fd_ref_feats
+                    )
+                elif args.proj_type == 'fd_repa':
+                    time_t = time_in * 0.25
+                    z_t = sit_outputs["pred_x"]
+                    teacher_outputs = ema(
+                        x=torch.cat([z, z_t], dim=0),
+                        y=torch.cat([labels, labels], dim=0),
+                        loss_kwargs=loss_kwargs,
+                        time_input=torch.cat([time_t, time_t], dim=0),
+                        noises=None,
+                        return_feat=True,
+                    )
+                    feat_ref, feat_dis = torch.chunk(teacher_outputs["fs_tilde"][0], 2, dim=0)
+                    (
+                        proj_loss,
+                        fd_pred_feats,
+                        fd_ref_feats,
+                    ) = ema_fd_loss(
+                        feat_dis,
+                        feat_ref,
+                        fd_dino_pred_stats,
+                        fd_dino_ref_stats,
+                    )
+                    fd_dino_pred_stats.update(
+                        fd_pred_feats
+                    )
+                    fd_dino_ref_stats.update(
+                        fd_ref_feats
+                    )
+                elif args.proj_type == 'fd_dino_fact':
+                    x_t = ((vae.decode(sit_outputs["pred_x"]) + 1.0) / 2.0) * 255.0
+                    z_dis = encoder.forward_features(preprocess_raw_image(x_t, encoder_type))['x_norm_patchtokens']
+                    z_ref = zs[0]
+                    (
+                        proj_loss,
+                        fd_pred_feats,
+                        fd_ref_feats,
+                    ) = ema_factorized_fd_loss(
+                        z_dis,
+                        z_ref,
+                        fd_dino_pred_stats,
+                        fd_dino_ref_stats,
+                    )
+                    fd_dino_pred_stats.update(
+                        fd_pred_feats
+                    )
+                    fd_dino_ref_stats.update(
+                        fd_ref_feats
+                    )
+                    proj_loss = proj_loss / 256.0
+                elif args.proj_type == 'fd_repa_fact':
+                    time_t = time_in * 0.25
+                    z_t = sit_outputs["pred_x"]
+                    teacher_outputs = ema(
+                        x=torch.cat([z, z_t], dim=0),
+                        y=torch.cat([labels, labels], dim=0),
+                        loss_kwargs=loss_kwargs,
+                        time_input=torch.cat([time_t, time_t], dim=0),
+                        noises=None,
+                        return_feat=True,
+                    )
+                    feat_ref, feat_dis = torch.chunk(teacher_outputs["fs_tilde"][0], 2, dim=0)
+                    (
+                        proj_loss,
+                        fd_pred_feats,
+                        fd_ref_feats,
+                    ) = ema_factorized_fd_loss(
+                        feat_dis,
+                        feat_ref,
+                        fd_dino_pred_stats,
+                        fd_dino_ref_stats,
+                    )
+                    fd_dino_pred_stats.update(
+                        fd_pred_feats
+                    )
+                    fd_dino_ref_stats.update(
+                        fd_ref_feats
+                    )
+                    proj_loss = proj_loss / 256.0
                 else:
                     assert(0)
 
-                diffusion_loss = sit_loss + proj_loss * args.proj_coeff + sit_loss["proj_loss"] * args.proj_coeff
+                # diffusion_loss = sit_loss + proj_loss * args.proj_coeff + sit_outputs["proj_loss"] * args.proj_coeff
+                diffusion_loss = sit_loss + proj_loss * args.proj_coeff
                 accelerator.backward(diffusion_loss)
 
                 if accelerator.sync_gradients:
