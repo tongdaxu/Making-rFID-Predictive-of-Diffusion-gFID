@@ -254,6 +254,15 @@ class Encoder(nn.Module):
             padding=1,
         )
 
+    def _checkpoint(self, module, *args):
+        if self.training:
+            return checkpoint(
+                module,
+                *args,
+                use_reentrant=False,
+            )
+        return module(*args)
+
     def forward(self, x):
         # assert x.shape[2] == x.shape[3] == self.resolution, "{}, {}, {}".format(x.shape[2], x.shape[3], self.resolution)
 
@@ -264,7 +273,11 @@ class Encoder(nn.Module):
         hs = [self.conv_in(x)]
         for i_level in range(self.num_resolutions):
             for i_block in range(self.num_res_blocks):
-                h = self.down[i_level].block[i_block](hs[-1], temb)
+                h = self._checkpoint(
+                    self.down[i_level].block[i_block],
+                    hs[-1],
+                    temb,
+                )
                 if len(self.down[i_level].attn) > 0:
                     h = self.down[i_level].attn[i_block](h)
                 hs.append(h)
@@ -378,6 +391,15 @@ class Decoder(nn.Module):
             block_in, out_ch, kernel_size=3, stride=1, padding=1
         )
 
+    def _checkpoint(self, module, *args):
+        if self.training:
+            return checkpoint(
+                module,
+                *args,
+                use_reentrant=False,
+            )
+        return module(*args)
+
     def forward(self, z):
         # assert z.shape[1:] == self.z_shape[1:]
         self.last_z_shape = z.shape
@@ -397,7 +419,11 @@ class Decoder(nn.Module):
         # upsampling
         for i_level in reversed(range(self.num_resolutions)):
             for i_block in range(self.num_res_blocks + 1):
-                h = self.up[i_level].block[i_block](h, temb)
+                h = self._checkpoint(
+                    self.up[i_level].block[i_block],
+                    h,
+                    temb,
+                )
                 if len(self.up[i_level].attn) > 0:
                     h = self.up[i_level].attn[i_block](h)
             if i_level != 0:
