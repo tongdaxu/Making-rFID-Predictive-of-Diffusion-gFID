@@ -1,1 +1,1 @@
-target: ifid.vae.cont.SOFTVQ
+target: ifid.vae.continuous_tokenizer_vae.SOFTVQ

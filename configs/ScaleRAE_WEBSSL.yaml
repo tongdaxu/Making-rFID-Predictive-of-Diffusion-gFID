@@ -1,0 +1,12 @@
+target: ifid.vae.scalerae.ScaleRAE
+params:
+  encoder_name: facebook/webssl-dino300m-full2b-224
+  decoder_repo: nyu-visionx/webssl300m_decoder
+  encoder_type: webssl
+  encoder_input_size: 224
+  num_patches: 256
+  output_size: 256
+  select_layer: -1
+
+  feature_layer_norm: false
+  normalize_latents: false

@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+NUM_PROCESSES=8
+GPU_IDS="0,1,2,3,4,5,6,7"
+
+SAMPLE_DIR="./samples"
+DATASET="/video_ssd/lpm/ImageNet/val"
+CONFIG_DIR="./configs"
+
+SMALL_VAL=-1
+SAVE_EVERY=1
+SAVE_MAX=1
+
+LOG_DIR="./nohup_logs_recon_only"
+mkdir -p "${LOG_DIR}"
+
+JOBS=(
+  # "SD-VAE|SDVAE.yaml|ifid-sdvae"
+  # "FLUX-VAE|FLUXVAE.yaml|ifid-fluxvae"
+  # "QwenImg-VAE|QWVAE.yaml|ifid-qwenimgvae"
+  # "SD3-VAE|SD3VAE.yaml|ifid-sd3vae"
+  # "SOFT-VQ|SOFTVQ.yaml|ifid-softvq"
+  # "MAE-TOK|MAETOK.yaml|ifid-maetok"
+  # "DE-TOK|DETOK.yaml|ifid-detok"
+  # "DM-VAE|DMVAE.yaml|ifid-dmvae"
+  # "REPAE-SDVAE|REPAEVAE.yaml|ifid-repae-sdvae"
+  # "VTPB|VTPB.yaml|ifid-vtpb"
+  # "VTPL|VTPL.yaml|ifid-vtpl"
+  # "VTPS|VTPS.yaml|ifid-vtps"
+  # "EQ-VAE|EQVAE.yaml|ifid-eqvae"
+  # "IN-VAE|INVAE.yaml|ifid-invae"
+  # "VA-VAE|VAVAE.yaml|ifid-vavae"
+  # "VA-VAE-64|VAVAE64.yaml|ifid-vavae64"
+  # "RAE|RAE.yaml|ifid-rae"
+  # "FLUX2-VAE|FLUX2VAE.yaml|ifid-flux2"
+  # "SVG|SVG.yaml|ifid-svg"
+  # "UAE|UAE.yaml|ifid-uae"
+  # "ScaleRAE-SigLIP2|ScaleRAE_SIGLIP2.yaml|ifid-scalerae-siglip2"
+  # "ScaleRAE-WEBSSL|ScaleRAE_WEBSSL.yaml|ifid-scalerae-webssl"
+  # "SVG-T2I-P-256|SVGT2I_P_STAGE1_256.yaml|ifid-svg-t2i-p256"
+  # "DCAE|DCAE.yaml|ifid-dcae"
+  # "PAE-DINO|PAE_DINOv2L_d32.yaml|ifid-pae-dino"
+  # "GAE|GAE_D32.yaml|ifid-gae"
+)
+
+for job in "${JOBS[@]}"; do
+  IFS="|" read -r NAME CONFIG_FILE EXP_NAME <<< "${job}"
+
+  CONFIG_PATH="${CONFIG_DIR}/${CONFIG_FILE}"
+  OUT_FILE="${LOG_DIR}/${EXP_NAME}.out"
+
+  if [[ ! -f "${CONFIG_PATH}" ]]; then
+    echo "[SKIP] ${NAME}: config not found: ${CONFIG_PATH}"
+    echo "[SKIP] ${NAME}: config not found: ${CONFIG_PATH}" > "${OUT_FILE}"
+    continue
+  fi
+
+  echo "============================================================"
+  echo "[START] ${NAME}"
+  echo "[CONFIG] ${CONFIG_PATH}"
+  echo "[EXP] ${EXP_NAME}"
+  echo "[LOG] ${OUT_FILE}"
+  echo "============================================================"
+
+  nohup accelerate launch \
+    --num_processes="${NUM_PROCESSES}" \
+    --gpu_ids="${GPU_IDS}" \
+    --main_process_port 0 \
+    evalvae_recon_only.py \
+    --seed=0 \
+    --sample-dir="${SAMPLE_DIR}" \
+    --exp-name="${EXP_NAME}" \
+    --dataset="${DATASET}" \
+    --vae-config="${CONFIG_PATH}" \
+    --small-val "${SMALL_VAL}" \
+    -save \
+    --save-every "${SAVE_EVERY}" \
+    --save-max "${SAVE_MAX}" \
+    > "${OUT_FILE}" 2>&1
+
+  echo "[DONE] ${NAME}"
+  echo
+done
+
+echo "All recon-only jobs finished."

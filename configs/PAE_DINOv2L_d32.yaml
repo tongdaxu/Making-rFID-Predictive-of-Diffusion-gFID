@@ -1,0 +1,19 @@
+target: ifid.vae.pae.PAEWrapper
+params:
+  # The wrapper will clone the official repo here if it does not exist.
+  pae_repo_dir: ifid/vae/PAE
+  auto_clone: true
+
+  # Official PAE collection on Hugging Face.
+  hf_repo_id: yuezhengrong/PAE-collections
+
+  # Official PAE stage-1 config and checkpoint.
+  pae_config_relpath: pae_with_generator/configs/pae/PAE_DINOv2L_d32.yaml
+  ckpt_filename: AE-models/dinov2-large.pt
+
+  # Official latent is [B, 32, 16, 16]. bf16 matches their extraction script.
+  model_dtype: bf16
+  device_dtype_for_encoder: true
+  output_size: 256
+  clamp_decode: true
+  verbose: true

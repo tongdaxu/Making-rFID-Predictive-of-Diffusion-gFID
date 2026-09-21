@@ -25,6 +25,9 @@ Record.md
 
 acc_single.yaml
 *.out
+*.done
+*.csv
+*.txt
 *.sh
 # C extensions
 *.so

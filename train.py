@@ -27,6 +27,50 @@ from accelerate.utils import DistributedDataParallelKwargs
 
 logger = get_logger(__name__)
 
+def unwrap_vae_latents(z):
+    """
+    Normalize different VAE encode() return types to Tensor.
+    """
+    if isinstance(z, (tuple, list)):
+        z = z[0]
+
+    if not torch.is_tensor(z):
+        raise TypeError(f"vae.encode() should return Tensor or tuple/list of Tensor, got {type(z)}")
+
+    return z
+
+
+def prepare_latents_for_sit(z):
+    """
+    Convert VAE latents to SiT-compatible format.
+
+    Supported:
+      [B, C, H, W]  -> unchanged
+      [B, N, C]     -> [B, C, sqrt(N), sqrt(N)]
+
+    Example:
+      ScaleRAE SigLIP2:
+        [B, 256, 1152] -> [B, 1152, 16, 16]
+    """
+    z = unwrap_vae_latents(z)
+
+    if z.ndim == 4:
+        return z.contiguous()
+
+    if z.ndim == 3:
+        b, n, c = z.shape
+        side = int(math.sqrt(n))
+
+        if side * side != n:
+            raise RuntimeError(
+                f"Token latent length N={n} is not a square number; cannot reshape to 2D map."
+            )
+
+        z = z.transpose(1, 2).contiguous().view(b, c, side, side)
+        return z.contiguous()
+
+    raise RuntimeError(f"Unsupported latent shape for SiT: {tuple(z.shape)}")
+
 
 def count_trainable_params(m):
     return sum(p.numel() for p in m.parameters() if p.requires_grad)
@@ -181,7 +225,12 @@ def main(args):
         param.requires_grad_(False)
 
     fake_in = torch.zeros([1, 3, args.resolution, args.resolution]).to(device)
-    fake_z = vae.encode(fake_in)[0]
+
+    with torch.no_grad():
+        fake_z_batch = vae.encode(fake_in)
+        fake_z_batch = prepare_latents_for_sit(fake_z_batch)
+
+    fake_z = fake_z_batch[0]
 
     if accelerator.is_main_process:
         logger.info(f"VAE fake_z shape: {tuple(fake_z.shape)}")
@@ -319,6 +368,7 @@ def main(args):
                 vae.eval()
                 with torch.no_grad():
                     z = vae.encode(processed_image)
+                    z = prepare_latents_for_sit(z)
                 # 2). Backward pass: VAE, compute the VAE loss, backpropagate, and update the VAE; Then, compute the riminator loss and update the discriminator
                 #    loss_kwargs used for SiT forward function, create here and can be reused for both VAE and SiT
                 loss_kwargs = dict(

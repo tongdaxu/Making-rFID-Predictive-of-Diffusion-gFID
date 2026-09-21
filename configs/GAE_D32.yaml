@@ -1,0 +1,23 @@
+target: ifid.vae.gae.GAE
+params:
+  # Official repo will be cloned here if missing.
+  repo_dir: /video_ssd/kongzishang/xutongda/git/IFID/third_party/GAE
+  auto_clone: true
+
+  # Official GAE AE config in the repo.
+  gae_config_relpath: configs/ae/gae_d32.yaml
+
+  # Official HF checkpoint. The repo README lists GAE latent dim 32 and the HF weights;
+  # the file under d32 is the AE checkpoint used for inference.
+  hf_repo: sii-research/gae-imagenet256-f16d32
+  ckpt_filename: d32/gae_d32_inference.ckpt
+  ckpt_path: null
+  hf_cache_dir: null
+
+  # Keep fp32 first for correctness. You can try bf16 after the wrapper sanity test passes.
+  model_dtype: fp32
+
+  # Official extraction uses posterior.mode(); this is deterministic and best for IFID.
+  encode_mode: mode
+  clamp_decode: false
+  verbose: true

@@ -1,0 +1,6 @@
+# configs/EQVAE.yaml
+target: ifid.vae.klvae.KLVAE
+params:
+  embed_dim: 4
+  ch_mult: [1, 2, 4, 4]
+  ckpt_path: /share/xutongda/hfhome/hub/eq-vae-ema-ldm/model.ckpt

@@ -1,0 +1,8 @@
+target: ifid.vae.raev2.RAEv2
+params:
+  official_repo_dir: /video_ssd/kongzishang/xutongda/git/IFID/third_party/RAEv2
+  sampling_config_relpath: configs/stage1/sampling/dinov3l-k23-general.yaml
+  hf_repo_id: nyu-visionx/RAEv2-models
+  model_dtype: bf16
+  use_autocast: true
+  auto_download: true

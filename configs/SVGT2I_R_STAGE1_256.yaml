@@ -1,0 +1,28 @@
+target: ifid.vae.svg_t2i.SVGT2I
+params:
+  ckpt_path: /share/xutongda/hfhome/SVG-T2I/pre-trained/autoencoder/svg_autoencoder-R-stage1.ckpt
+
+  image_size: 256
+  output_clamp: true
+  strict: false
+
+  embed_dim: 32
+
+  ddconfig:
+    double_z: true
+    z_channels: 384
+    resolution: 256
+    in_channels: 3
+    out_ch: 3
+    ch: 128
+    ch_mult: [1, 1, 2, 2, 4]
+    num_res_blocks: 2
+    attn_resolutions: []
+    dropout: 0.0
+
+  dinoconfig:
+    dinov3_location: /video_ssd/kongzishang/xutongda/git/dinov3
+    model_name: dinov3_vits16plus
+    weights: /video_ssd/kongzishang/xutongda/git/dinov3/dinov3_vits16plus_pretrain_lvd1689m-4057cbaa.pth
+
+  extra_vit_config: null

@@ -1,0 +1,3 @@
+target: ifid.vae.dcae.DCAE
+params:
+  ckpt_folder: mit-han-lab/dc-ae-f32c32-sana-1.0-diffusers

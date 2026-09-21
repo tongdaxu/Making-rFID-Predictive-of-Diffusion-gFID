@@ -1,0 +1,11 @@
+target: ifid.vae.scalerae.ScaleRAE
+params:
+  encoder_name: google/siglip2-so400m-patch14-224
+  decoder_repo: nyu-visionx/siglip2_decoder
+  encoder_type: siglip2
+  encoder_input_size: 224
+  num_patches: 256
+  output_size: 256
+  select_layer: -1
+  feature_layer_norm: false
+  normalize_latents: false

@@ -661,7 +661,6 @@ DeTok_models = {
     "detok_XLXL": detok_XLXL,
 }
 
-
 class DETOKEXPORT(nn.Module):
     def __init__(self, ckpt_path, *args, **kwargs):
         super().__init__()

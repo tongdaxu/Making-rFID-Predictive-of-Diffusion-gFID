@@ -82,7 +82,7 @@ def parse_args():
     )
     parser.add_argument("--alpha", type=float, default=0.5)
     parser.add_argument("--exp-name", type=str, default="ifid")
-    parser.add_argument("--small", type=int, default=-1)
+    parser.add_argument("--small", type=int, default=200000)
     parser.add_argument("--small_val", type=int, default=-1)
     parser.add_argument("--sample-dir", type=str, default="./samples")
     parser.add_argument("--top", type=int, default=10)

@@ -1,7 +1,7 @@
-from ifid.vae.autoencoder import AutoencoderKL
-from huggingface_hub import hf_hub_download
 import torch
 import torch.nn as nn
+from ifid.vae.autoencoder import AutoencoderKL
+from huggingface_hub import hf_hub_download
 import os
 
 
@@ -15,20 +15,65 @@ class KLVAE(nn.Module):
                 repo_id=repo_id,
                 filename=fname,
             )
-        vae_ckpt = torch.load(ckpt_path, map_location="cpu")
+
+        ckpt = torch.load(ckpt_path, map_location="cpu")
+
+        # Lightning / LDM checkpoint
+        if isinstance(ckpt, dict) and "state_dict" in ckpt:
+            state_dict = ckpt["state_dict"]
+        else:
+            state_dict = ckpt
+
+        # remove possible wrappers
+        clean_state_dict = {}
+        for k, v in state_dict.items():
+            nk = k
+            for prefix in [
+                "first_stage_model.",
+                "module.",
+                "model.",
+                "vae.",
+            ]:
+                if nk.startswith(prefix):
+                    nk = nk[len(prefix):]
+            clean_state_dict[nk] = v
+
         self.vae = AutoencoderKL(
             embed_dim=embed_dim,
             ch_mult=ch_mult,
             use_variational=True,
         )
-        self.vae.load_state_dict(vae_ckpt, strict=False)
+
+        missing, unexpected = self.vae.load_state_dict(clean_state_dict, strict=False)
+
+        print(f"[KLVAE] loaded from: {ckpt_path}")
+        print(f"[KLVAE] missing keys: {len(missing)}")
+        print(f"[KLVAE] unexpected keys: {len(unexpected)}")
+
+        for k in missing[:30]:
+            print("[KLVAE][missing]", k)
+        for k in unexpected[:30]:
+            print("[KLVAE][unexpected]", k)
+
+        bad_missing = [
+            k for k in missing
+            if k.startswith("encoder.")
+            or k.startswith("decoder.")
+            or k.startswith("quant_conv.")
+            or k.startswith("post_quant_conv.")
+        ]
+
+        if len(bad_missing) > 0:
+            raise RuntimeError(
+                "KLVAE checkpoint/model mismatch. "
+                f"Bad missing keys: {bad_missing[:30]}"
+            )
 
     def encode(self, x, *args, **kwargs):
         return self.vae.encode(x, sample=True)
 
     def decode(self, z, *args, **kwargs):
         return self.vae.decode(z).sample
-
 
 if __name__ == "__main__":
     from omegaconf import OmegaConf

@@ -1,0 +1,12 @@
+target: ifid.vae.pae.PAEWrapper
+params:
+  pae_repo_dir: ifid/vae/PAE
+  auto_clone: true
+  hf_repo_id: yuezhengrong/PAE-collections
+  pae_config_relpath: pae_with_generator/configs/pae/PAE_SigLIP2SO_d32.yaml
+  ckpt_filename: AE-models/siglip2-so400m.pt
+  model_dtype: bf16
+  device_dtype_for_encoder: true
+  output_size: 256
+  clamp_decode: true
+  verbose: true

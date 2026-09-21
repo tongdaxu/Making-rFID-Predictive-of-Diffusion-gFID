@@ -60,20 +60,20 @@ class UNet(nn.Module):
         self.pre_unet = nn.PixelUnshuffle(self.patch_size)
 
         self.class_embedder = ClassEmbedder(
-            512, n_classes=self.num_classes+1,
+            1280, n_classes=self.num_classes+1,
         )
         self.unet_model = UNetModel(
             image_size=(input_size//self.patch_size),
             in_channels=in_channels*(self.patch_size**2),
             out_channels=in_channels*(self.patch_size**2),
-            model_channels=256,
+            model_channels=320,
             attention_resolutions=(4,2,1),
             num_res_blocks=2,
-            channel_mult=(1,2,4),
-            num_head_channels=32,
+            channel_mult=(1,2,4,4),
+            num_heads=8,
             use_spatial_transformer=True,
             transformer_depth=1,
-            context_dim=512,
+            context_dim=1280,
             # num_classes=self.num_classes,
         )
         self.post_unet = nn.PixelShuffle(self.patch_size)
@@ -81,6 +81,15 @@ class UNet(nn.Module):
     def shift_time(self, t):
         shifted_t = self.tshift * t / (1 + (self.tshift - 1) * t)
         return shifted_t
+
+    def _to_unet_timestep(self, t):
+        if t.ndim == 4:
+            t = t[:, 0, 0, 0]
+        elif t.ndim > 1:
+            t = t.reshape(t.shape[0], -1)[:, 0]
+
+        # LDM/OpenAI UNet timestep embedding should not receive tiny 0~1 values.
+        return t.float() * 1000.0
 
     def init_bn(self, latents_scale, latents_bias):
         # latents_scale = 1 / sqrt(variance); latents_bias = mean
@@ -133,6 +142,11 @@ class UNet(nn.Module):
 
         return custom_forward
 
+    def normalize_latents(self, x):
+        mean = self.bn.running_mean.view(1, -1, 1, 1).to(device=x.device, dtype=x.dtype)
+        var = self.bn.running_var.view(1, -1, 1, 1).to(device=x.device, dtype=x.dtype)
+        return (x - mean) / torch.sqrt(var + self.bn.eps)
+
     def forward(
         self,
         x,
@@ -152,14 +166,25 @@ class UNet(nn.Module):
         """
         # Normalize the input x with batch norm running stats
         normalized_x = self.bn(x)
+        # normalized_x = self.normalize_latents(x)
 
         # sample timesteps if not provided
         if time_input is None:
             if loss_kwargs["weighting"] == "uniform":
-                time_input = torch.rand((normalized_x.shape[0], 1, 1, 1))
+                # time_input = torch.rand((normalized_x.shape[0], 1, 1, 1))
+                time_input = torch.rand(
+                    (normalized_x.shape[0], 1, 1, 1),
+                    device=normalized_x.device,
+                    dtype=normalized_x.dtype,
+                )
             elif loss_kwargs["weighting"] == "lognormal":
                 # sample timestep according to log-normal distribution of sigmas following EDM
-                rnd_normal = torch.rand((normalized_x.shape[0], 1, 1, 1))
+                # rnd_normal = torch.rand((normalized_x.shape[0], 1, 1, 1))
+                rnd_normal = torch.randn(
+                    (normalized_x.shape[0], 1, 1, 1),
+                    device=normalized_x.device,
+                    dtype=normalized_x.dtype,
+                )
                 sigma = rnd_normal.exp()
                 if loss_kwargs["path_type"] == "linear":
                     time_input = sigma / (1 + sigma)
@@ -192,11 +217,23 @@ class UNet(nn.Module):
             raise NotImplementedError()  # TODO: add x or eps prediction
 
         # label dropout
-        drop_mask = torch.rand(y.shape[0], device=y.device) < self.class_dropout_prob
-        y[drop_mask] = self.num_classes
+        # drop_mask = torch.rand(y.shape[0], device=y.device) < self.class_dropout_prob
+        # y[drop_mask] = self.num_classes
+        y_drop = y.clone()
+        drop_mask = torch.rand(y_drop.shape[0], device=y_drop.device) < self.class_dropout_prob
+        y_drop[drop_mask] = self.num_classes
 
         # unet forward
-        model_output = self.post_unet(self.unet_model(x=self.pre_unet(model_input), timesteps=time_input[:,0,0,0], context=self.class_embedder(y)))
+        # model_output = self.post_unet(self.unet_model(x=self.pre_unet(model_input), timesteps=time_input[:,0,0,0], context=self.class_embedder(y_drop)))
+        t_unet = self._to_unet_timestep(time_input)
+
+        model_output = self.post_unet(
+            self.unet_model(
+                x=self.pre_unet(model_input),
+                timesteps=t_unet,
+                context=self.class_embedder(y_drop),
+            )
+        )
 
         # loss computation
         denoising_loss = mean_flat((model_output - model_target) ** 2)
@@ -212,7 +249,15 @@ class UNet(nn.Module):
 
     @torch.no_grad()
     def inference(self, x, t, y):
-        model_output = self.post_unet(self.unet_model(x=self.pre_unet(x), timesteps=t, context=self.class_embedder(y)))
+        t_unet = self._to_unet_timestep(t)
+
+        model_output = self.post_unet(
+            self.unet_model(
+                x=self.pre_unet(x),
+                timesteps=t_unet,
+                context=self.class_embedder(y),
+            )
+        )
         return model_output
 
     @torch.no_grad()
