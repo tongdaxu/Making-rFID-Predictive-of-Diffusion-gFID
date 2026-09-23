@@ -1114,7 +1114,7 @@ def main(args):
                     z_t = sit_outputs["pred_x"]
                     # z_t = vae.encode(vae.decode(z_t)) # idempotence
                     # z_t = a_t * z + (1 - a_t) * sit_outputs["pred_x"]
-                    teacher_outputs = ema(
+                    teacher_outputs = teacher(
                         x=torch.cat([z, z_t], dim=0),
                         y=torch.cat([labels, labels], dim=0),
                         loss_kwargs=loss_kwargs,
@@ -1123,6 +1123,28 @@ def main(args):
                         return_feat=True,
                     )
                     feat_ref, feat_dis = torch.chunk(teacher_outputs["fs_tilde"][0], 2, dim=0)
+                    feat_ref, feat_dis = F.normalize(feat_ref, dim=-1), F.normalize(feat_dis, dim=-1)
+                    proj_loss = torch.mean(mean_flat(-(feat_ref * feat_dis).sum(dim=-1)))
+                elif args.proj_type == "cosk":
+                    time_t = time_in * 0.25
+                    z_t = sit_outputs["pred_x"]
+                    K = 6
+                    B = z.size(0)
+                    sigma_t = (time_in / torch.sqrt(time_in**2 + (1-time_in)**2 + 1e-4)).to(z_t.device)
+                    sigma_t = torch.cat([sigma_t]*K, dim=0)
+                    z_k = torch.cat([z.detach()]*K, dim=0)
+                    z_k = z_k + sigma_t * torch.randn_like(z_k)
+                    teacher_outputs = teacher(
+                        x=torch.cat([z_t, z_k], dim=0),
+                        y=torch.cat([labels]*(K+1), dim=0),
+                        loss_kwargs=loss_kwargs,
+                        time_input=torch.cat([time_t]*(K+1), dim=0),
+                        noises=None,
+                        return_feat=True,
+                    )
+                    feat_dis, feat_refs = teacher_outputs["fs_tilde"][0][:B], teacher_outputs["fs_tilde"][0][B:]
+                    feat_refs = feat_refs.reshape(K, B, *feat_refs.shape[1:])
+                    feat_ref = torch.mean(feat_refs, dim=0)
                     feat_ref, feat_dis = F.normalize(feat_ref, dim=-1), F.normalize(feat_dis, dim=-1)
                     proj_loss = torch.mean(mean_flat(-(feat_ref * feat_dis).sum(dim=-1)))
                 elif args.proj_type == "mse":
@@ -1260,8 +1282,8 @@ def main(args):
                 else:
                     assert(0)
 
-                # diffusion_loss = sit_loss + proj_loss * args.proj_coeff + sit_outputs["proj_loss"] * args.proj_coeff
-                diffusion_loss = sit_loss + proj_loss * args.proj_coeff
+                diffusion_loss = sit_loss + proj_loss * args.proj_coeff + sit_outputs["proj_loss"] * args.proj_coeff
+                # diffusion_loss = sit_loss + proj_loss * args.proj_coeff
                 accelerator.backward(diffusion_loss)
 
                 if accelerator.sync_gradients:
