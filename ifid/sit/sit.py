@@ -687,6 +687,12 @@ class SiT(nn.Module):
 
 from ifid.sit.ddt import ConditionEmbedder
 from ifid.sit.mmdit import MMDiTBlock
+from ifid.ddt.DDT import DiTwDDTHead
+
+class CondArch:
+    def __init__(self):
+        self.num_t_tokens = 4
+        self.num_c_tokens = 256
 
 class SiTT2I(nn.Module):
     """
@@ -699,10 +705,9 @@ class SiTT2I(nn.Module):
         input_size=32,
         patch_size=2,
         in_channels=4,
-        hidden_size=1152,
-        decoder_hidden_size=768,
-        depth=28,
-        num_heads=16,
+        hidden_size=[1152, 2048],
+        depth=[28, 2],
+        num_heads=[16, 16],
         mlp_ratio=4.0,
         num_classes=1000,
         bn_momentum=0.1,
@@ -716,7 +721,6 @@ class SiTT2I(nn.Module):
         tm_dim=-1,
         tm_schedule=(1,),
         z_dims=[1024],
-        **block_kwargs,  # fused_attn
     ):
         super().__init__()
         self.path_type = path_type
@@ -729,36 +733,6 @@ class SiTT2I(nn.Module):
         self.prediction_internal = prediction_internal
         self.tk_drop = tk_drop
         self.tk_drop_mode = tk_drop_mode
-
-        if self.vae_1d:
-            self.x_embedder = nn.Linear(in_channels, hidden_size)
-            num_patches = input_size
-            assert self.patch_size == 1
-        else:
-            self.x_embedder = PatchEmbed(
-                input_size, patch_size, in_channels, hidden_size, bias=True
-            )
-            num_patches = self.x_embedder.num_patches
-
-        self.t_embedder = TimestepEmbedder(hidden_size)  # timestep embedding type
-        self.y_embedder = ConditionEmbedder(num_classes=num_classes, hidden_size=hidden_size, condition_type="text", n_tokens=8, context_dim=1024)
-
-        # Will use fixed sin-cos embedding:
-        self.pos_embed = nn.Parameter(
-            torch.zeros(1, num_patches, hidden_size), requires_grad=False
-        )
-
-        self.blocks = nn.ModuleList(
-            [
-                MMDiTBlock(hidden_size, num_heads, mlp_ratio=mlp_ratio, **block_kwargs)
-                for _ in range(depth)
-            ]
-        )
-
-        self.final_layer = FinalLayer(
-            decoder_hidden_size, patch_size, self.out_channels
-        )
-        # Note that we disable affine parameters in the batch norm layer, to avoid affine hacking diffusion loss
 
         if self.vae_1d:
             self.bn = torch.nn.BatchNorm1d(
@@ -778,8 +752,6 @@ class SiTT2I(nn.Module):
             )
 
         self.tshift = tshift
-        self.bn.reset_running_stats()
-        self.initialize_weights()
         self.encoder_depth = 8
         if self.prediction_internal == "x":
             self.t_eps = 4e-2
@@ -790,11 +762,23 @@ class SiTT2I(nn.Module):
         self.tm_dim = tm_dim
         self.tm_schedule = tm_schedule
 
-        projector_dim=2048
-        if z_dims is not None:
-            self.projectors = nn.ModuleList([
-                build_mlp(hidden_size, projector_dim, z_dim) for z_dim in z_dims
-            ])
+        self.model = DiTwDDTHead(
+            input_size=input_size,
+            in_channels=in_channels,
+            patch_size=[patch_size, patch_size],
+            hidden_size=hidden_size,
+            depth=depth,
+            num_heads=num_heads,
+            mlp_ratio=mlp_ratio,
+            enable_repa=True,
+            repa_layer_depth=8,
+            z_dim=z_dims[0],
+            cond_arch=CondArch(),
+            condition_type="text",
+            context_dim=1024,
+        )
+        self.bn.reset_running_stats()
+        self.initialize_weights()
 
     def shift_time(self, t):
         shifted_t = self.tshift * t / (1 + (self.tshift - 1) * t)
@@ -856,51 +840,7 @@ class SiTT2I(nn.Module):
 
     def initialize_weights(self):
         # Initialize transformer layers:
-        def _basic_init(module):
-            if isinstance(module, nn.Linear):
-                torch.nn.init.xavier_uniform_(module.weight)
-                if module.bias is not None:
-                    nn.init.constant_(module.bias, 0)
-
-        self.apply(_basic_init)
-
-        # Initialize (and freeze) pos_embed by sin-cos embedding:
-
-        if not self.vae_1d:
-            pos_embed = get_2d_sincos_pos_embed(
-                self.pos_embed.shape[-1], int(self.x_embedder.num_patches**0.5)
-            )
-        else:
-            pos_embed = positionalencoding1d(
-                self.pos_embed.shape[-1], self.pos_embed.shape[-2]
-            )
-
-        self.pos_embed.data.copy_(torch.from_numpy(pos_embed).float().unsqueeze(0))
-
-        # Initialize patch_embed like nn.Linear (instead of nn.Conv2d):
-
-        if not self.vae_1d:
-            w = self.x_embedder.proj.weight.data
-            nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
-            nn.init.constant_(self.x_embedder.proj.bias, 0)
-        else:
-            w = self.x_embedder.weight.data
-            nn.init.xavier_uniform_(w.view([w.shape[0], -1]))
-            nn.init.constant_(self.x_embedder.bias, 0)
-
-        # Initialize timestep embedding MLP:
-        nn.init.normal_(self.t_embedder.mlp[0].weight, std=0.02)
-        nn.init.normal_(self.t_embedder.mlp[2].weight, std=0.02)
-
-        # Zero-out adaLN modulation layers in SiT blocks:
-        for block in self.blocks:
-            block.initialize_adaLN_zero()
-
-        # Zero-out output layers:
-        nn.init.constant_(self.final_layer.adaLN_modulation[-1].weight, 0)
-        nn.init.constant_(self.final_layer.adaLN_modulation[-1].bias, 0)
-        nn.init.constant_(self.final_layer.linear.weight, 0)
-        nn.init.constant_(self.final_layer.linear.bias, 0)
+        self.model.initialize_weights()
 
     def init_bn(self, latents_scale, latents_bias):
         # latents_scale = 1 / sqrt(variance); latents_bias = mean
@@ -962,7 +902,6 @@ class SiTT2I(nn.Module):
         time_input=None,
         noises=None,
         zs=None, # alignment
-        return_feat=False,
         **kwargs,
     ):
         """
@@ -1025,30 +964,12 @@ class SiTT2I(nn.Module):
         else:
             raise NotImplementedError()  # TODO: add x or eps prediction
 
-        x = (
-            self.x_embedder(model_input) + self.pos_embed
-        )  # (N, T, D), where T = H * W / patch_size ** 2
-        N, T, D = x.shape
-        # timestep and class embedding
-        t_embed = self.t_embedder(time_input.flatten())  # (N, D)
-        y = self.y_embedder(y)  # (N, Ty, D)
-        c = t_embed  # (N, D)
-        zs_tilde, fs_tilde = [], []
-        for i, block in enumerate(self.blocks):
-            # checkpoint
-            # x = torch.utils.checkpoint.checkpoint(block, x, c, use_reentrant=False)
-            x, y = block(x, y, c, text_mask=y_mask)  # (N, T, D)
-            if return_feat is True and (i + 1) == self.encoder_depth:
-                fs_tilde = [x.reshape(-1, T, D)]
-            if (zs is not None) and (i + 1) == self.encoder_depth:
-                zs_tilde = [projector(x.reshape(-1, D)).reshape(N, T, -1) for projector in self.projectors]
-                # NOTE: add a shortcut for feature extraction
-                if loss_kwargs.get("align_only", False):
-                    break
-        
-        x = self.final_layer(x, c)  # (N, T, patch_size ** 2 * out_channels)
-        if not self.vae_1d:
-            x = self.unpatchify(x)  # (N, out_channels, H, W)
+        condition_kwargs = {
+            "context": y,
+            "context_mask": y_mask,
+        }
+        x, z_tilde = self.model(model_input, time_input.squeeze(), True, **condition_kwargs)
+        zs_tilde = [z_tilde]
 
         if self.prediction_internal == "x":
             pred_x_normalized = x
@@ -1074,6 +995,7 @@ class SiTT2I(nn.Module):
         proj_loss = torch.tensor(0., device=x.device)
 
         if zs is not None:
+            assert(len(zs) == 0)
             bsz = zs[0].shape[0]
             for i, (z, z_tilde) in enumerate(zip(zs, zs_tilde)):
                 for z_j, z_tilde_j in zip(z, z_tilde):
@@ -1089,7 +1011,6 @@ class SiTT2I(nn.Module):
             "time_input": time_input,
             "noises": noises,
             "zs_tilde": zs_tilde,
-            "fs_tilde": fs_tilde,
             "proj_loss": proj_loss,
         }
 
@@ -1098,50 +1019,12 @@ class SiTT2I(nn.Module):
     @torch.no_grad()
     def inference(self, x, t, y, y_mask=None, **kwargs):
         zt = x.clone()
-        x = (
-            self.x_embedder(x) + self.pos_embed
-        )  # (N, T, D), where T = H * W / patch_size ** 2
-        N, T, D = x.shape
-        # timestep and class embedding
-        t_embed = self.t_embedder(t)  # (N, D)
-        y = self.y_embedder(y)  # (N, D)
-        c = t_embed  # (N, D)
-
-        for block in self.blocks:
-            x, y = block(x, y, c, text_mask=y_mask)  # (N, T, D)
-        x = self.final_layer(x, c)  # (N, T, patch_size ** 2 * out_channels)
-        if not self.vae_1d:
-            x = self.unpatchify(x)  # (N, out_channels, H, W)
-        if self.prediction_internal == "x":
-            if not self.vae_1d:
-                x = (zt - x) / t[:,None,None,None]
-            else:
-                x = (zt - x) / t[:,None,None]
-        elif self.prediction_internal == "v" or self.prediction_internal is None:
-            x = x
-        else:
-            raise NotImplementedError()
-        
+        condition_kwargs = {
+            "context": y,
+            "context_mask": y_mask,
+        }
+        x, _ = self.model(zt, t.squeeze(), True, **condition_kwargs)
         return x
-
-    @torch.no_grad()
-    def forward_feats(self, x, t, y, depth, y_mask=None):
-        assert 1 <= depth <= len(self.blocks)
-        x = (
-            self.x_embedder(x) + self.pos_embed
-        )  # (N, T, D), where T = H * W / patch_size ** 2
-
-        # timestep and class embedding
-        t_embed = self.t_embedder(t)  # (N, D)
-        y = self.y_embedder(y, self.training)  # (N, D)
-        c = t_embed  # (N, D)
-
-        for i, block in enumerate(self.blocks):
-            x, y = block(x, y, c, text_mask=y_mask)  # (N, T, D)
-            if (i + 1) == depth:
-                return x
-
-        return None
 
 #################################################################################
 #                   Sine/Cosine Positional Embedding Functions                  #

@@ -497,6 +497,7 @@ def _prepare_blip3o_loader(
         batch_size=batch_size,
         num_workers=num_workers,
         pin_memory=True,
+        persistent_workers=True,
         multiprocessing_context="spawn" if num_workers > 0 else None,
     )
     # Bound epoch to exactly `steps` batches (with_epoch stops iteration, with_length only sets __len__)

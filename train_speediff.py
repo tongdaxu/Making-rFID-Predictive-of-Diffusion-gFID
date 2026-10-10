@@ -28,6 +28,7 @@ import torchvision.transforms.v2 as v2
 from ifid.sit.sit import mean_flat
 from timm.data import IMAGENET_DEFAULT_MEAN, IMAGENET_DEFAULT_STD
 from torchvision.transforms import Normalize
+import torch.nn.functional as F
 
 logger = get_logger(__name__)
 
@@ -493,6 +494,34 @@ def main(args):
                 else:
                     ploss = None
 
+                if args.dloss > 0.0:
+                    # pred_x = accelerator.unwrap_model(vae).decode(sit_outputs["pred_x"])
+
+                    time_in = sit_outputs["time_input"]
+                    time_next = time_in * 0.5
+                    a_next = ((time_next * (1 - time_in)) / (time_in * (1 - time_next) + 1e-3)).to(z.device)
+                    z_next = a_next * z + (1 - a_next) * sit_outputs["pred_x"]
+                    next_outputs = model_copy(
+                        x=z_next,
+                        y=labels,
+                        loss_kwargs=loss_kwargs,
+                        time_input=time_next,
+                        noises=noises,
+                        return_feat=False,
+                    )
+                    pred_x = accelerator.unwrap_model(vae).decode(next_outputs["pred_x"])
+
+                    x_t = ((pred_x + 1.0) / 2.0) * 255.0
+                    z_dis = encoder.forward_features(preprocess_raw_image(x_t, encoder_type))['x_norm_patchtokens']
+                    z_ref = zs[0]
+                    z_dis = F.normalize(z_dis, dim=-1) 
+                    z_ref = F.normalize(z_ref, dim=-1) 
+                    dloss = mean_flat(-(z_dis * z_ref).sum(dim=-1))
+                    dloss = torch.mean(dloss)
+                    sit_loss += dloss * args.dloss
+                else:
+                    dloss = None
+
                 if args.spdloss > 0.0:
                     '''
                     time_output = sit_outputs["time_input"].reshape(z.shape[0])
@@ -567,6 +596,9 @@ def main(args):
 
                 if spdloss is not None:
                     logs["spdloss"] = accelerator.gather(spdloss).mean().detach().item()
+
+                if dloss is not None:
+                    logs["dloss"] = accelerator.gather(dloss).mean().detach().item()
 
                 progress_bar.set_postfix(**logs)
                 accelerator.log(logs, step=global_step)
@@ -685,6 +717,9 @@ def parse_args(input_args=None):
     )
     parser.add_argument(
         "--spdloss", type=float, default=0.0,
+    )
+    parser.add_argument(
+        "--dloss", type=float, default=0.0,
     )
     parser.add_argument(
         "--mixed-precision", type=str, default="fp16", choices=["no", "fp16", "bf16"]

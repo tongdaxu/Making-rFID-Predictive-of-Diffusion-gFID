@@ -198,16 +198,11 @@ def main(args):
 
     tshift = math.sqrt(float(fake_z.numel()) / 4096.0)
 
-    block_kwargs = {"fused_attn": True, "qk_norm": False}
-
     model = SiTT2I(
         input_size=latent_size,
         patch_size=1 if latent_size == 16 else 32,
         in_channels=in_channels,
         tshift=tshift,
-        hidden_size=1152,
-        decoder_hidden_size=1152,
-        **block_kwargs,
     )
 
     # make a copy of the model for EMA
@@ -240,26 +235,26 @@ def main(args):
 
     local_batch_size = int(args.batch_size // accelerator.num_processes)
     dataset_config = {
-        "data_dir": "./assets/blip3o-256",
+        "data_dir": "./data/blip3o-256",
         "splits": ["journeydb", "long-caption", "short-caption"]
     }
     val_dataset_configs = [
         {
             "dataset_name": "geneval",
             "config": {
-                "data_dir": "./assets"
+                "data_dir": "./data"
             },
         },
         {
             "dataset_name": "dpgbench",
             "config": {
-                "data_dir": "./assets"
+                "data_dir": "./data"
             },
         },
         {
             "dataset_name": "genaibench",
             "config": {
-                "data_dir": "./assets"
+                "data_dir": "./data"
             },
         },
     ]
@@ -342,6 +337,7 @@ def main(args):
 
     for epoch in range(args.epochs):
         model.train()
+        vae.eval()
 
         for raw_image, y in train_dataloader:
             raw_image = raw_image.to(device)            
@@ -355,11 +351,10 @@ def main(args):
 
                 # dropout
                 y = ["" if random.random() < args.cfg_prob else s for s in y]
-                text_embed, text_mask = encode_text(text_encoder, y)
-                vae.eval()
                 with torch.no_grad():
+                    text_embed, text_mask = encode_text(text_encoder, y)
                     z = vae.encode(processed_image)
-                    xhat = vae.decode(z)
+                    # xhat = vae.decode(z)
                 # 2). Backward pass: VAE, compute the VAE loss, backpropagate, and update the VAE; Then, compute the riminator loss and update the discriminator
                 #    loss_kwargs used for SiT forward function, create here and can be reused for both VAE and SiT
                 loss_kwargs = dict(
@@ -402,7 +397,7 @@ def main(args):
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
 
-                psnr = torch.mean(get_psnr(processed_image, xhat, zero_mean=True, integer=True))
+                # psnr = torch.mean(get_psnr(processed_image, xhat, zero_mean=True, integer=True))
 
                 # 5). Update SiT EMA
                 if accelerator.sync_gradients:
@@ -429,7 +424,7 @@ def main(args):
                     .detach()
                     .item(),
                     "epoch": epoch,
-                    "psnr": accelerator.gather(psnr).mean().detach().item(),
+                    # "psnr": accelerator.gather(psnr).mean().detach().item(),
                 }
 
                 if ploss is not None:
@@ -478,7 +473,7 @@ def main(args):
                         xT,
                         ys,
                         num_steps=50,
-                        cfg_scale=2.0,
+                        cfg_scale=6.0,
                         guidance_low=0.0,
                         guidance_high=1.0,
                         path_type=args.path_type,
@@ -561,7 +556,7 @@ def parse_args(input_args=None):
     parser.add_argument("--max-train-steps", type=int, default=400000)
     parser.add_argument("--checkpointing-steps", type=int, default=50000)
     parser.add_argument("--gradient-accumulation-steps", type=int, default=1)
-    parser.add_argument("--learning-rate", type=float, default=1e-4)
+    parser.add_argument("--learning-rate", type=float, default=2e-4)
     parser.add_argument(
         "--adam-beta1",
         type=float,
