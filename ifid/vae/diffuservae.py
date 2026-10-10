@@ -43,24 +43,60 @@ class QWVAE(nn.Module):
         xhat = self.model.decode(z[:, :, None], return_dict=False)[0][:, :, 0]
         return xhat
 
+class QW2VAE(nn.Module):
+    def __init__(self, hf_repo="Qwen/Qwen-Image-2.1", *args, **kwargs):
+        super().__init__()
+        from diffusers import AutoencoderKLQwenImage21
+
+        self.model = AutoencoderKLQwenImage21.from_pretrained(hf_repo, subfolder="vae")
+
+    def encode(
+        self,
+        x,
+        *args, **kwargs,
+    ):
+        x = torch.cat([x, torch.ones_like(x[:, :1])], dim=1)
+        qzx = self.model.encode(x[:, :, None], return_dict=False)[0]
+        z = qzx.sample()[:, :, 0]
+        return z
+
+    def decode(self, z, *args, **kwargs):
+        xhat = self.model.decode(z[:, :, None], return_dict=False)[0][:, :, 0]
+        return xhat[:,:3]
+
+    def forward(self, x, *args, **kwargs):
+        qzx = self.model.encode(x[:, :, None], return_dict=False)[0]
+        z = qzx.sample()[:, :, 0]
+        xhat = self.decode(z)
+        log = {
+            "xhat": xhat,
+            "posterior": qzx,
+        }
+        return xhat, log
 
 if __name__ == "__main__":
     from omegaconf import OmegaConf
     from ifid.vae.utils import instantiate_from_config
 
-    configs = OmegaConf.load("../../configs/QWVAE.yaml")
+    configs = OmegaConf.load("./configs/QWVAE.yaml")
     sdvae = instantiate_from_config(configs)
     z = sdvae.encode(torch.randn([1, 3, 256, 256]))
     xhat = sdvae.decode(z)
     print(z.shape, xhat.shape)
 
-    configs = OmegaConf.load("../../configs/SD3VAE.yaml")
+    configs = OmegaConf.load("./configs/SD3VAE.yaml")
     sdvae = instantiate_from_config(configs)
     z = sdvae.encode(torch.randn([1, 3, 256, 256]))
     xhat = sdvae.decode(z)
     print(z.shape, xhat.shape)
 
-    configs = OmegaConf.load("../../configs/FLUXVAE.yaml")
+    configs = OmegaConf.load("./configs/FLUXVAE.yaml")
+    sdvae = instantiate_from_config(configs)
+    z = sdvae.encode(torch.randn([1, 3, 256, 256]))
+    xhat = sdvae.decode(z)
+    print(z.shape, xhat.shape)
+
+    configs = OmegaConf.load("./configs/QW2VAE.yaml")
     sdvae = instantiate_from_config(configs)
     z = sdvae.encode(torch.randn([1, 3, 256, 256]))
     xhat = sdvae.decode(z)
