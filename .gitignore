@@ -237,3 +237,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Operating system metadata
+.DS_Store
+._*
+__MACOSX/
+Thumbs.db
+desktop.ini
