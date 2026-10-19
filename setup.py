@@ -5,6 +5,7 @@ setup(
     version="0.0.0",
     packages=[
         "ifid",
+        "metrics",
         "ifid.sit",
         "ifid.unet",
         "ifid.fid",
@@ -30,6 +31,5 @@ setup(
         "ifid.vae.rae_module",
         "ifid.vae.rae_module.encoders",
         "ifid.vae.rae_module.decoders",
-        "ifid.loss",
     ],
 )

@@ -1,3 +1,0 @@
-target: ifid.vae.gae.GAE
-params:
-  ckpt_path: ./checkpoints/ckpt.ckpt

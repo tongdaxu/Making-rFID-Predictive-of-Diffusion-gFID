@@ -79,7 +79,7 @@ def main(args):
         args.tf32
     )  # True: fast but may lead to some small numerical differences
     assert torch.cuda.is_available(), (
-        "Sampling with DDP requires at least one GPU. sample.py supports CPU-only usage"
+        "generate.py requires at least one CUDA GPU and must be launched with torchrun."
     )
     torch.set_grad_enabled(False)
 
@@ -109,7 +109,7 @@ def main(args):
 
     # Create model:
 
-    vae_config = OmegaConf.load(config.vae_config)
+    vae_config = OmegaConf.load(args.vae_config or config.vae_config)
     vae = instantiate_from_config(vae_config).to(device)
     vae.eval()
     for name, param in vae.named_parameters():
@@ -144,8 +144,7 @@ def main(args):
         class_dropout_prob=config.cfg_prob,
         bn_momentum=config.bn_momentum,
         tshift=tshift,
-        prediction_internal=config.prediction_internal,
-        bn_1d=config.bn_1d,
+        prediction_internal=config.get("prediction_internal", "v"),
         z_dims=None,
         **block_kwargs,
     ).to(device)
@@ -157,14 +156,23 @@ def main(args):
         map_location=f"cuda:{device}",
         weights_only=False,
     )
-    model.load_state_dict(state_dict["ema"], strict=False)
+    missing, unexpected = model.load_state_dict(state_dict["ema"], strict=False)
+    # Training may save auxiliary projection heads that are unused for sampling.
+    unexpected_model = [key for key in unexpected if not key.startswith("projectors.")]
+    if missing or unexpected_model:
+        raise RuntimeError(
+            f"Incompatible SiT checkpoint: missing={missing}, unexpected={unexpected_model}"
+        )
     model.eval()  # Important! To disable label dropout during sampling
 
     if "vae" in state_dict.keys():
-        miss_keys, unexp_keys = vae.load_state_dict(state_dict["vae"], strict=False)
-        print("loading vae")
-        print("missing: ", miss_keys)
-        print("unexp_keys: ", unexp_keys)
+        vae_state = state_dict["vae"]
+        vae_target = vae
+        # Released KL-VAE checkpoints store the unwrapped autoencoder state.
+        if hasattr(vae, "vae") and set(vae_state) == set(vae.vae.state_dict()):
+            vae_target = vae.vae
+        vae_target.load_state_dict(vae_state, strict=True)
+        print("Loaded checkpoint VAE weights with all keys matched.")
 
     del state_dict
     gc.collect()
@@ -288,7 +296,7 @@ def main(args):
 
     # Make sure all processes have finished saving their samples before attempting to convert to .npz
     dist.barrier()
-    if rank == 0:
+    if rank == 0 and not args.skip_fid:
         # create_npz_from_sample_folder(sample_folder_dir, args.num_fid_samples)
         # print("create npz done.")
         from ifid.fid.fid import calculate_fid_given_paths
@@ -334,7 +342,8 @@ def main(args):
             print("precision={0:.4f}".format(other["precision"]))
             print("recall={0:.4f}".format(other["recall"]))
 
-        shutil.rmtree(sample_folder_dir)
+        if not args.keep_samples:
+            shutil.rmtree(sample_folder_dir)
     dist.barrier()
     dist.destroy_process_group()
 
@@ -354,6 +363,12 @@ if __name__ == "__main__":
 
     # logging/saving params
     parser.add_argument("--sample-dir", type=str, default="samples")
+    parser.add_argument("--vae-config", type=str, default=None,
+                        help="Override the VAE config path saved in args.json.")
+    parser.add_argument("--skip-fid", action="store_true",
+                        help="Only generate PNG images; no FID reference is required. Keeps samples.")
+    parser.add_argument("--keep-samples", action="store_true",
+                        help="Keep generated PNG images after FID evaluation.")
 
     # ckpt params
     parser.add_argument(

@@ -228,6 +228,7 @@ def main(args):
             except TypeError:
                 z = vae.encode(img)
 
+        decode_dtype = z.dtype
         if args.cpu:
             z = z.cpu().to(torch.bfloat16)
 
@@ -308,7 +309,10 @@ def main(args):
 
         znn_candidate = znn_candidate.to(device)
 
-        dist.all_reduce(znn_candidate, op=dist.ReduceOp.SUM)
+        # A single-process Accelerator does not initialize a process group.
+        # Its candidate bank is already complete, so no reduction is needed.
+        if world_size > 1:
+            dist.all_reduce(znn_candidate, op=dist.ReduceOp.SUM)
         znn_candidate_flat = znn_candidate.reshape(z.shape[0], K, -1)
         local_cost = torch.mean((z_flat[:, None] - znn_candidate_flat) ** 2, dim=-1)
         local_cost = local_cost.to(torch.float32)
@@ -351,6 +355,11 @@ def main(args):
             # img_intp = accelerator.unwrap_model(vae).decode(z_intp)
             # img_nn = accelerator.unwrap_model(vae).decode(znn)
             raw_vae = accelerator.unwrap_model(vae)
+            if args.cpu:
+                # Restore the encoder output dtype after the bfloat16 CPU bank.
+                z = z.to(dtype=decode_dtype)
+                z_intp = z_intp.to(dtype=decode_dtype)
+                znn = znn.to(dtype=decode_dtype)
             try:
                 img_recon = raw_vae.decode(z, y)
                 img_intp = raw_vae.decode(z_intp, y)

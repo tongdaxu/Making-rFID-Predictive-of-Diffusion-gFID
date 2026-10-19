@@ -1,3 +1,0 @@
-target: ifid.vae.continuous_tokenizer_vae.ContinuousTokenizerVAE
-params:
-  ckpt_file: ./checkpoints/0100000.pt

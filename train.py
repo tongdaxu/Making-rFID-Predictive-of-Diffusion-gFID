@@ -266,7 +266,10 @@ def main(args):
     global_step = 0
     if args.resume_step > 0:
         ckpt_name = str(args.resume_step).zfill(7) + ".pt"
-        ckpt_path = f"{args.cont_dir}/checkpoints/{ckpt_name}"
+        resume_dir = args.continue_train_exp_dir or os.path.join(
+            args.output_dir, args.exp_name
+        )
+        ckpt_path = os.path.join(resume_dir, "checkpoints", ckpt_name)
 
         # If the checkpoint exists, we load the checkpoint and resume the training
         ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
