@@ -422,12 +422,12 @@ def main(args):
 
                     global_seen += 1
 
-            pred_psnr = get_psnr(img_in, img_recon, zero_mean=True)
+            pred_psnr = get_psnr(img_in, img_recon, zero_mean=False)
             pred_ssim, pred_msssim = get_ssim_and_msssim(
-                img_in, img_recon, zero_mean=True
+                img_in, img_recon, zero_mean=False
             )
             pred_lpips = get_lpips(
-                img_in, img_recon, zero_mean=True, network_type="alex"
+                img_in, img_recon, zero_mean=False, network_type="alex"
             )
 
             arr_psnr.append(torch.mean(pred_psnr).item())

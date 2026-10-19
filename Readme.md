@@ -50,7 +50,7 @@ python evalvaefast.py --vae-config=configs/SDVAE.yaml \
   --dataset=ImageNet/val --bs=25
 ```
 
-This prints rFID, PSNR and LPIPS. **The two evaluators use different PSNR/LPIPS input-range conventions:** `evalvae.py` passes `[0,1]` images with `zero_mean=True`, whereas `evalvaefast.py` uses `False`. Their PSNR/LPIPS values should not be compared directly; this does not affect iFID/rFID.
+This prints rFID, PSNR and LPIPS. Both evaluators use `[0,1]` images for reconstruction metrics. Earlier versions of `evalvae.py` used an incorrect input-range flag for PSNR, SSIM, MS-SSIM and LPIPS; those scores should be recomputed. iFID and rFID are unaffected by this correction.
 
 ## Inference
 
